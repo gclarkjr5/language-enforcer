@@ -1,0 +1,27 @@
+{
+  "productName": "Language Enforcer Review",
+  "version": "0.1.0",
+  "identifier": "com.languageenforcer.review",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Language Enforcer Review",
+        "width": 900,
+        "height": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

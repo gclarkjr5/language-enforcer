@@ -12,7 +12,7 @@ use arboard::Clipboard;
 use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use le_core::{default_new_card, schedule_sm2, Card, Language, Review, SessionConfig, Word};
+use le_core::{default_new_card, Language, SessionConfig, Word};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -104,23 +104,6 @@ fn handle_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<boo
                 app.mode = Mode::AddWord;
                 return Ok(false);
             }
-            KeyCode::Char('r') => {
-                match start_review_session(conn, app) {
-                    Ok(has_cards) => {
-                        if !has_cards {
-                            app.set_message("No cards due yet".to_string());
-                            app.mode = Mode::Message;
-                        } else {
-                            app.mode = Mode::Review;
-                        }
-                    }
-                    Err(err) => {
-                        app.set_message(format!("Failed to load session: {err}"));
-                        app.mode = Mode::Message;
-                    }
-                }
-                return Ok(false);
-            }
             KeyCode::Char('v') => {
                 match start_review_list(conn, app) {
                     Ok(()) => app.mode = Mode::ReviewList,
@@ -150,7 +133,6 @@ fn handle_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<boo
     match app.mode {
         Mode::Menu => handle_menu_key(conn, app, key),
         Mode::AddWord => handle_add_key(conn, app, key),
-        Mode::Review => handle_review_key(conn, app, key),
         Mode::ReviewList => handle_review_list_key(conn, app, key),
         Mode::Import => handle_import_key(conn, app, key),
         Mode::ImportPreview => handle_import_preview_key(conn, app, key),
@@ -182,23 +164,6 @@ fn handle_menu_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Resul
                 app.mode = Mode::Message;
             } else {
                 app.start_add(text);
-            }
-            Ok(false)
-        }
-        KeyCode::Char('r') => {
-            match start_review_session(conn, app) {
-                Ok(has_cards) => {
-                    if !has_cards {
-                        app.set_message("No cards due yet".to_string());
-                        app.mode = Mode::Message;
-                    } else {
-                        app.mode = Mode::Review;
-                    }
-                }
-                Err(err) => {
-                    app.set_message(format!("Failed to load session: {err}"));
-                    app.mode = Mode::Message;
-                }
             }
             Ok(false)
         }
@@ -536,30 +501,6 @@ fn handle_chapter_select_key(conn: &Connection, app: &mut App, key: KeyEvent) ->
     }
 }
 
-fn handle_review_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
-    match key.code {
-        KeyCode::Char('q') => {
-            app.end_review_session();
-            app.mode = Mode::AddWord;
-            Ok(false)
-        }
-        KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4') => {
-            let grade = match key.code {
-                KeyCode::Char('1') => 1,
-                KeyCode::Char('2') => 3,
-                KeyCode::Char('3') => 4,
-                _ => 5,
-            };
-            if let Err(err) = record_review(conn, app, grade) {
-                app.set_message(format!("Failed to save review: {err}"));
-                app.mode = Mode::Message;
-            }
-            Ok(false)
-        }
-        _ => Ok(false),
-    }
-}
-
 fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -569,7 +510,6 @@ fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     match app.mode {
         Mode::AddWord => render_add(frame, app, chunks[0]),
         Mode::Menu => frame.render_widget(render_menu(app), chunks[0]),
-        Mode::Review => frame.render_widget(render_review(app), chunks[0]),
         Mode::ReviewList => render_review_list(frame, app, chunks[0]),
         Mode::Import => render_import(frame, app, chunks[0]),
         Mode::ImportPreview => render_import_preview(frame, app, chunks[0]),
@@ -588,7 +528,6 @@ fn render_menu(app: &App) -> Paragraph<'_> {
     text.lines.push(Line::from("c - add from clipboard"));
     text.lines.push(Line::from("i - import image"));
     text.lines.push(Line::from("v - review list"));
-    text.lines.push(Line::from("r - review session"));
     text.lines.push(Line::from("q - quit"));
 
     Paragraph::new(text)
@@ -857,34 +796,6 @@ fn render_chapter_select(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_review(app: &App) -> Paragraph<'_> {
-    let mut text = Text::default();
-    if let Some(session) = &app.review_session {
-        if let Some(card) = session.current() {
-            text.lines.push(Line::from("Recall the word"));
-            text.lines.push(Line::from(""));
-            text.lines.push(Line::from(Span::styled(
-                &card.word.text,
-                Style::default().add_modifier(Modifier::BOLD),
-            )));
-            text.lines.push(Line::from(""));
-            text.lines
-                .push(Line::from("1=again 2=hard 3=good 4=easy | q=quit"));
-            text.lines.push(Line::from(""));
-            text.lines.push(Line::from(format!(
-                "Progress: {}/{} | Correct: {}",
-                session.index + 1,
-                session.cards.len(),
-                session.correct_count
-            )));
-        }
-    }
-
-    Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title("Review"))
-        .wrap(Wrap { trim: true })
-}
-
 fn render_message(app: &App) -> Paragraph<'_> {
     let message = app.message.clone().unwrap_or_else(|| "".to_string());
     Paragraph::new(message)
@@ -965,17 +876,16 @@ fn render_confirm(app: &App) -> Paragraph<'_> {
 
 fn render_footer(app: &App) -> Paragraph<'_> {
     let info = match app.mode {
-        Mode::Menu => "a add | c clipboard | i import | r review | q quit | Ctrl+A add | Ctrl+O import | Ctrl+R review | Ctrl+V list | Ctrl+Q quit",
+        Mode::Menu => "a add | c clipboard | i import | v review list | q quit | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
         Mode::AddWord => {
-            "Enter save | Tab switch | Esc clear | Ctrl+A add | Ctrl+O import | Ctrl+R review | Ctrl+V list | Ctrl+Q quit"
+            "Enter save | Tab switch | Esc clear | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
         }
-        Mode::Review => "1-4 grade | q quit | Ctrl+A add | Ctrl+V list | Ctrl+Q quit",
-        Mode::ReviewList => "Up/Down or j/k move | Enter/Space toggle | d delete | D delete all | q back | Ctrl+A add | Ctrl+R review | Ctrl+Q quit",
+        Mode::ReviewList => "Up/Down or j/k move | Enter/Space toggle | d delete | D delete all | q back | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
         Mode::Import => "Up/Down or j/k move | Tab focus | Enter preview | Esc cancel",
         Mode::ImportPreview => "Up/Down or j/k scroll | y confirm import | n back | Esc back",
         Mode::ChapterSelect => "Up/Down or j/k move | Enter select | Esc back",
         Mode::Confirm => "y confirm | n cancel",
-        Mode::Message => "Any key back | Ctrl+A add | Ctrl+R review | Ctrl+V list | Ctrl+Q quit",
+        Mode::Message => "Any key back | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
     };
 
     Paragraph::new(info).block(Block::default().borders(Borders::ALL).title("Control Command Center"))
@@ -1007,7 +917,6 @@ struct App {
     message: Option<String>,
     confirm_message: Option<String>,
     confirm_action: Option<ConfirmAction>,
-    review_session: Option<ReviewSession>,
     review_list: Vec<Word>,
     review_list_selection: usize,
     review_list_collapsed: HashSet<String>,
@@ -1049,7 +958,6 @@ impl App {
             message: None,
             confirm_message: None,
             confirm_action: None,
-            review_session: None,
             review_list: Vec::new(),
             review_list_selection: 0,
             review_list_collapsed: HashSet::new(),
@@ -1068,13 +976,6 @@ impl App {
     }
 
     fn tick(&mut self) {
-        if let Some(session) = &self.review_session {
-            if session.should_end(self.session_config.max_minutes) {
-                self.set_message("Session time limit reached".to_string());
-                self.review_session = None;
-                self.mode = Mode::Message;
-            }
-        }
         self.process_translation();
     }
 
@@ -1193,10 +1094,6 @@ impl App {
         self.dutch_input.clear();
         self.english_input.clear();
         self.reset_translation_state();
-    }
-
-    fn end_review_session(&mut self) {
-        self.review_session = None;
     }
 
     fn review_list_move(&mut self, delta: i32) {
@@ -1429,7 +1326,6 @@ impl App {
 enum Mode {
     Menu,
     AddWord,
-    Review,
     ReviewList,
     Confirm,
     Import,
@@ -1448,12 +1344,6 @@ enum AddField {
 enum ImportField {
     Chapter,
     List,
-}
-
-#[derive(Debug, Clone)]
-struct ReviewCard {
-    card: Card,
-    word: Word,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1662,27 +1552,6 @@ fn translate_batch_via_api(
     Ok(response.translations.into_iter().map(|item| item.text).collect())
 }
 
-#[derive(Debug)]
-struct ReviewSession {
-    cards: Vec<ReviewCard>,
-    index: usize,
-    correct_count: usize,
-    started_at: Instant,
-}
-
-impl ReviewSession {
-    fn current(&self) -> Option<&ReviewCard> {
-        self.cards.get(self.index)
-    }
-
-    fn should_end(&self, max_minutes: Option<u64>) -> bool {
-        if let Some(minutes) = max_minutes {
-            return self.started_at.elapsed() >= Duration::from_secs(minutes * 60);
-        }
-        false
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct ConfigFile {
     session: SessionConfig,
@@ -1822,24 +1691,6 @@ fn word_exists(conn: &Connection, text: &str, language: Language) -> rusqlite::R
     Ok(rows.next()?.is_some())
 }
 
-fn start_review_session(conn: &Connection, app: &mut App) -> rusqlite::Result<bool> {
-    let now = Utc::now();
-    let cards = load_session_cards(conn, now, &app.session_config)?;
-    if cards.is_empty() {
-        app.review_session = None;
-        return Ok(false);
-    }
-
-    app.review_session = Some(ReviewSession {
-        cards,
-        index: 0,
-        correct_count: 0,
-        started_at: Instant::now(),
-    });
-
-    Ok(true)
-}
-
 fn start_review_list(conn: &Connection, app: &mut App) -> rusqlite::Result<()> {
     app.review_list = load_all_words(conn)?;
     app.review_list_selection = 0;
@@ -1973,92 +1824,6 @@ fn last_group_for_chapter(conn: &Connection, chapter: &str) -> rusqlite::Result<
     } else {
         Ok(None)
     }
-}
-
-fn load_session_cards(
-    conn: &Connection,
-    now: DateTime<Utc>,
-    config: &SessionConfig,
-) -> rusqlite::Result<Vec<ReviewCard>> {
-    let mut cards = Vec::new();
-
-    let mut stmt = conn.prepare(
-        "SELECT c.id, c.word_id, c.due_at, c.interval_days, c.ease, c.reps, c.lapses,
-                w.id, w.text, w.language, w.translation, w.chapter, w.group_name, w.sentence, w.created_at
-         FROM cards c
-         JOIN words w ON w.id = c.word_id
-         WHERE c.due_at <= ?1 AND c.reps > 0
-         ORDER BY c.due_at
-         LIMIT ?2",
-    )?;
-
-    let due_iter = stmt.query_map(
-        params![now.to_rfc3339(), config.max_cards as i64],
-        row_to_review_card,
-    )?;
-
-    for card in due_iter {
-        cards.push(card?);
-    }
-
-    let remaining = config.max_cards.saturating_sub(cards.len());
-    if remaining == 0 {
-        return Ok(cards);
-    }
-
-    let new_limit = remaining.min(config.max_new_cards);
-    if new_limit == 0 {
-        return Ok(cards);
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT c.id, c.word_id, c.due_at, c.interval_days, c.ease, c.reps, c.lapses,
-                w.id, w.text, w.language, w.translation, w.chapter, w.group_name, w.sentence, w.created_at
-         FROM cards c
-         JOIN words w ON w.id = c.word_id
-         WHERE c.reps = 0
-         ORDER BY c.due_at
-         LIMIT ?1",
-    )?;
-
-    let new_iter = stmt.query_map(params![new_limit as i64], row_to_review_card)?;
-    for card in new_iter {
-        cards.push(card?);
-    }
-
-    Ok(cards)
-}
-
-fn row_to_review_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewCard> {
-    let card = Card {
-        id: Uuid::parse_str(row.get::<_, String>(0)?.as_str()).unwrap_or_else(|_| Uuid::new_v4()),
-        word_id: Uuid::parse_str(row.get::<_, String>(1)?.as_str()).unwrap_or_else(|_| Uuid::new_v4()),
-        due_at: DateTime::parse_from_rfc3339(row.get::<_, String>(2)?.as_str())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
-        interval_days: row.get(3)?,
-        ease: row.get(4)?,
-        reps: row.get(5)?,
-        lapses: row.get(6)?,
-    };
-
-    let word = Word {
-        id: Uuid::parse_str(row.get::<_, String>(7)?.as_str()).unwrap_or_else(|_| Uuid::new_v4()),
-        text: row.get(8)?,
-        language: match row.get::<_, String>(9)?.as_str() {
-            "Dutch" => Language::Dutch,
-            _ => Language::English,
-        },
-        translation: row.get(10)?,
-        chapter: row.get(11)?,
-        group: row.get(12)?,
-        sentence: row.get(13)?,
-        created_at: DateTime::parse_from_rfc3339(row.get::<_, String>(14)?.as_str())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
-    };
-
-    Ok(ReviewCard { card, word })
 }
 
 fn delete_word(conn: &Connection, word_id: Uuid) -> rusqlite::Result<()> {
@@ -2320,62 +2085,4 @@ fn median(mut values: Vec<f32>) -> f32 {
     } else {
         values[mid]
     }
-}
-
-fn record_review(conn: &Connection, app: &mut App, grade: u8) -> rusqlite::Result<()> {
-    let now = Utc::now();
-    let session = match &mut app.review_session {
-        Some(session) => session,
-        None => return Ok(()),
-    };
-
-    let Some(current) = session.cards.get_mut(session.index) else {
-        return Ok(());
-    };
-
-    let mut card = current.card.clone();
-    schedule_sm2(&mut card, grade, now);
-
-    conn.execute(
-        "UPDATE cards SET due_at = ?1, interval_days = ?2, ease = ?3, reps = ?4, lapses = ?5 WHERE id = ?6",
-        params![
-            card.due_at.to_rfc3339(),
-            card.interval_days,
-            card.ease,
-            card.reps,
-            card.lapses,
-            card.id.to_string()
-        ],
-    )?;
-
-    let review = Review {
-        id: Uuid::new_v4(),
-        card_id: card.id,
-        grade,
-        reviewed_at: now,
-    };
-
-    conn.execute(
-        "INSERT INTO reviews (id, card_id, grade, reviewed_at) VALUES (?1, ?2, ?3, ?4)",
-        params![
-            review.id.to_string(),
-            review.card_id.to_string(),
-            review.grade,
-            review.reviewed_at.to_rfc3339()
-        ],
-    )?;
-
-    if grade >= 3 {
-        session.correct_count += 1;
-    }
-
-    session.index += 1;
-
-    if session.index >= session.cards.len() || session.correct_count >= app.session_config.stop_after_correct {
-        app.set_message("Session complete".to_string());
-        app.review_session = None;
-        app.mode = Mode::Message;
-    }
-
-    Ok(())
 }
