@@ -8,6 +8,11 @@
   let error = ''
   let dueCount = 0
   let totalCount = 0
+  let sessionActive = false
+  let showSessionPrompt = false
+  let reviewedThisSession = 0
+  let reportNote = ''
+  let showReport = false
 
   const grades = [
     { label: 'Again', value: 1 },
@@ -33,6 +38,26 @@
       const next = await invoke('next_due_card')
       current = next
       showAnswer = false
+      if (!next && sessionActive) {
+        showSessionPrompt = true
+      }
+    } catch (err) {
+      error = String(err)
+    } finally {
+      loading = false
+    }
+  }
+
+  async function startSession() {
+    loading = true
+    error = ''
+    showSessionPrompt = false
+    reviewedThisSession = 0
+    try {
+      await invoke('start_session')
+      sessionActive = true
+      await refreshCounts()
+      await loadNext()
     } catch (err) {
       error = String(err)
     } finally {
@@ -46,6 +71,7 @@
     error = ''
     try {
       await invoke('grade_card', { input: { card_id: current.card_id, grade: value } })
+      reviewedThisSession += 1
       await refreshCounts()
       await loadNext()
     } catch (err) {
@@ -57,6 +83,34 @@
 
   function reveal() {
     showAnswer = true
+  }
+
+  function openReport() {
+    reportNote = ''
+    showReport = true
+  }
+
+  async function submitReport() {
+    if (!current) return
+    loading = true
+    error = ''
+    try {
+      await invoke('report_issue', {
+        input: {
+          card_id: current.card_id,
+          word_id: current.word_id,
+          text: current.text,
+          translation: current.translation ?? null,
+          note: reportNote.trim() ? reportNote.trim() : null,
+          reported_at: new Date().toISOString()
+        }
+      })
+      showReport = false
+    } catch (err) {
+      error = String(err)
+    } finally {
+      loading = false
+    }
   }
 
   function handleKey(event) {
@@ -77,7 +131,7 @@
   onMount(async () => {
     window.addEventListener('keydown', handleKey)
     await refreshCounts()
-    await loadNext()
+    await startSession()
   })
 
   onDestroy(() => {
@@ -98,6 +152,33 @@
     <div class="error">{error}</div>
   {/if}
 
+  {#if showSessionPrompt}
+    <div class="modal-backdrop">
+      <div class="modal">
+        <h2>Session complete</h2>
+        <p>You've finished 10 cards. Want another 10?</p>
+        <div class="modal-actions">
+          <button class="grade" on:click={startSession}>Another 10</button>
+          <button class="ghost" on:click={() => { showSessionPrompt = false; sessionActive = false; }}>End session</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showReport}
+    <div class="modal-backdrop">
+      <div class="modal">
+        <h2>Report issue</h2>
+        <p>What’s wrong with this card?</p>
+        <textarea bind:value={reportNote} rows="4" placeholder="Optional note"></textarea>
+        <div class="modal-actions">
+          <button class="grade" on:click={submitReport} disabled={loading}>Submit</button>
+          <button class="ghost" on:click={() => (showReport = false)} disabled={loading}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if loading}
     <div class="card">Loading…</div>
   {:else if !current}
@@ -114,6 +195,7 @@
       {:else}
         <button class="reveal" on:click={reveal}>Show answer</button>
       {/if}
+      <button class="report" on:click={openReport}>Report issue</button>
     </div>
 
     <div class="actions">
@@ -128,7 +210,7 @@
       {/each}
     </div>
 
-    <div class="hint">Space/Enter to reveal. 1–4 to grade.</div>
+    <div class="hint">Space/Enter to reveal. 1–4 to grade. Session: {reviewedThisSession}/10</div>
   {/if}
 </main>
 
@@ -203,6 +285,25 @@
     gap: 12px;
     margin-top: 20px;
   }
+  .report {
+    margin-top: 16px;
+    background: transparent;
+    border: 1px dashed #475569;
+    color: #cbd5f5;
+    padding: 8px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  textarea {
+    width: 100%;
+    margin-top: 12px;
+    background: #0f172a;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 10px;
+    resize: vertical;
+  }
   .grade {
     background: #1f2937;
     border: 1px solid #334155;
@@ -233,5 +334,26 @@
     padding: 12px 16px;
     border-radius: 10px;
     margin-bottom: 16px;
+  }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+  }
+  .modal {
+    background: #111827;
+    padding: 24px;
+    border-radius: 16px;
+    min-width: 280px;
+    box-shadow: 0 20px 40px rgba(15, 23, 42, 0.45);
+  }
+  .modal-actions {
+    margin-top: 16px;
+    display: flex;
+    gap: 12px;
   }
 </style>

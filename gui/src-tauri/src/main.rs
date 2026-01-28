@@ -29,10 +29,20 @@ struct GradeInput {
     grade: u8,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct ReportInput {
+    card_id: String,
+    word_id: String,
+    text: String,
+    translation: Option<String>,
+    note: Option<String>,
+    reported_at: String,
+}
+
 #[derive(Default)]
 struct ReviewState {
     queue: Vec<String>,
-    last_refresh: Option<DateTime<Utc>>,
+    session_limit: usize,
 }
 
 fn app_db_path(app: &tauri::AppHandle) -> PathBuf {
@@ -73,6 +83,7 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
             ease REAL NOT NULL,
             reps INTEGER NOT NULL,
             lapses INTEGER NOT NULL,
+            seen_count INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(word_id) REFERENCES words(id)
         );
         CREATE TABLE IF NOT EXISTS reviews (
@@ -83,47 +94,54 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
             FOREIGN KEY(card_id) REFERENCES cards(id)
         );",
     )?;
+    ensure_seen_count(&conn)?;
     Ok(conn)
+}
+
+fn ensure_seen_count(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(cards)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "seen_count" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE cards ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0", [])?;
+    Ok(())
+}
+
+#[command]
+fn start_session(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) -> Result<(), String> {
+    let db_path = app_db_path(&app);
+    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM cards
+             WHERE due_at <= ?1
+             ORDER BY due_at",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params![now], |row| row.get::<_, String>(0))
+        .map_err(|err| err.to_string())?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|err| err.to_string())?);
+    }
+    let mut rng = rand::thread_rng();
+    ids.shuffle(&mut rng);
+    let mut guard = state.lock().map_err(|_| "Failed to lock review state".to_string())?;
+    let limit = guard.session_limit;
+    guard.queue = ids.into_iter().take(limit).collect();
+    Ok(())
 }
 
 #[command]
 fn next_due_card(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) -> Result<Option<ReviewItem>, String> {
     let db_path = app_db_path(&app);
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
-    let now = Utc::now();
     let mut guard = state.lock().map_err(|_| "Failed to lock review state".to_string())?;
-    let needs_refresh = guard.queue.is_empty()
-        || guard
-            .last_refresh
-            .map(|last| now.signed_duration_since(last).num_seconds() > 30)
-            .unwrap_or(true);
-
-    if needs_refresh {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM cards
-                 WHERE due_at <= ?1
-                 ORDER BY due_at",
-            )
-            .map_err(|err| err.to_string())?;
-        let rows = stmt
-            .query_map(params![now.to_rfc3339()], |row| row.get::<_, String>(0))
-            .map_err(|err| err.to_string())?;
-        let mut ids = Vec::new();
-        for row in rows {
-            ids.push(row.map_err(|err| err.to_string())?);
-        }
-        if ids.is_empty() {
-            guard.queue.clear();
-            guard.last_refresh = Some(now);
-            return Ok(None);
-        }
-        let mut rng = rand::thread_rng();
-        ids.shuffle(&mut rng);
-        guard.queue = ids;
-        guard.last_refresh = Some(now);
-    }
-
     let Some(card_id) = guard.queue.pop() else {
         return Ok(None);
     };
@@ -217,10 +235,32 @@ fn grade_card(app: tauri::AppHandle, input: GradeInput, state: State<'_, Mutex<R
     )
     .map_err(|err| err.to_string())?;
 
+    conn.execute(
+        "UPDATE cards SET seen_count = seen_count + 1 WHERE id = ?1",
+        params![card.id.to_string()],
+    )
+    .map_err(|err| err.to_string())?;
+
     if let Ok(mut guard) = state.lock() {
         guard.queue.retain(|id| id != &input.card_id);
     }
 
+    Ok(())
+}
+
+#[command]
+fn report_issue(app: tauri::AppHandle, input: ReportInput) -> Result<(), String> {
+    let mut path = app_db_path(&app);
+    path.pop();
+    path.push("reported_issues.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| err.to_string())?;
+    let line = serde_json::to_string(&input).map_err(|err| err.to_string())?;
+    use std::io::Write;
+    writeln!(file, "{}", line).map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -243,8 +283,17 @@ fn counts(app: tauri::AppHandle) -> Result<(i64, i64), String> {
 
 fn main() {
     tauri::Builder::default()
-        .manage(Mutex::new(ReviewState::default()))
-        .invoke_handler(tauri::generate_handler![next_due_card, grade_card, counts])
+        .manage(Mutex::new(ReviewState {
+            queue: Vec::new(),
+            session_limit: 10,
+        }))
+        .invoke_handler(tauri::generate_handler![
+            start_session,
+            next_due_card,
+            grade_card,
+            report_issue,
+            counts
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
