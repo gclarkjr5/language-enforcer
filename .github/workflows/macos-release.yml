@@ -1,0 +1,48 @@
+name: macOS Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: gui/frontend/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Install frontend deps
+        working-directory: gui/frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: gui/frontend
+        run: npm run build
+
+      - name: Build app (unsigned)
+        working-directory: gui/src-tauri
+        run: cargo tauri build
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: language-enforcer-review-macos
+          path: gui/src-tauri/target/release/bundle/dmg/*.dmg
