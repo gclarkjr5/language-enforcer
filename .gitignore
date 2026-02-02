@@ -1,6 +1,9 @@
-# target/
+target/
 data/
 img/
+gui/src-tauri/gen
+gui/src-tauri/target
+gui/frontend/dist
 # **/node_modules/
 # **/dist/
 # **/dist-ssr/
