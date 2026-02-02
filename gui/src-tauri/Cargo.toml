@@ -3,6 +3,10 @@ name = "language_enforcer_gui"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "language_enforcer_gui"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

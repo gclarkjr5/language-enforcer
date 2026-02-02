@@ -6,7 +6,7 @@
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
     "devUrl": "http://localhost:5173",
-    "frontendDist": "../frontend"
+    "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
@@ -22,6 +22,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "resources": [
+      "../../data/words.db"
+    ]
   }
 }
