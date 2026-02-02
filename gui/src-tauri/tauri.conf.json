@@ -23,9 +23,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": [
-      "../../data/words.db",
-      "../../data/config.toml"
-          ]
+    "resources": {
+      "../../data/words.db": "data/words.db",
+      "../../data/config.toml": "data/config.toml"
+    }
   }
 }

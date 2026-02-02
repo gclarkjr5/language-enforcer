@@ -77,6 +77,7 @@ fn app_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let db_path = dir.join("words.db");
 
+
     if !db_path.exists() {
         if let Some(seed) = find_seed_db(app) {
             std::fs::copy(&seed, &db_path).map_err(|err| err.to_string())?;
