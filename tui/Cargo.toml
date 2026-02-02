@@ -7,6 +7,7 @@ edition = "2024"
 arboard = "3"
 chrono = "0.4"
 crossterm = "0.27"
+directories = "5"
 le_core = { path = "../core" }
 ratatui = "0.27"
 reqwest = { version = "0.12", features = ["blocking", "json"] }

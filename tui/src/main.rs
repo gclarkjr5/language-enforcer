@@ -12,6 +12,7 @@ use arboard::Clipboard;
 use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use directories::ProjectDirs;
 use le_core::{default_new_card, Language, SessionConfig, Word};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -27,7 +28,9 @@ const TICK_MS: u64 = 100;
 const TRANSLATE_DEBOUNCE_MS: u64 = 400;
 
 fn main() -> io::Result<()> {
-    let data_dir = PathBuf::from("./data");
+    let data_dir = ProjectDirs::from("com", "languageenforcer", "Language Enforcer")
+        .map(|dirs| dirs.data_local_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("./data"));
     fs::create_dir_all(&data_dir)?;
 
     let db_path = data_dir.join("words.db");
