@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -9,20 +9,21 @@ use std::time::{Duration, Instant};
 use std::process::Command;
 
 use arboard::Clipboard;
-use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use directories::ProjectDirs;
-use le_core::{default_new_card, Language, SessionConfig, Word};
+use le_core::{Language, SessionConfig, Word};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
-use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+mod db;
+use crate::db::Db;
 
 const TICK_MS: u64 = 100;
 const TRANSLATE_DEBOUNCE_MS: u64 = 400;
@@ -36,8 +37,8 @@ fn main() -> io::Result<()> {
     let db_path = data_dir.join("words.db");
     let config_path = data_dir.join("config.toml");
 
-    let conn = Connection::open(db_path).expect("Error connecting to db");
-    init_db(&conn).expect("Error initializing db");
+    let db = Db::open(&db_path).expect("Error connecting to db");
+    db.init().expect("Error initializing db");
 
     let config = load_config(&config_path)?;
 
@@ -51,7 +52,7 @@ fn main() -> io::Result<()> {
     let (translation_tx, translation_rx) = mpsc::channel();
     let mut app = App::new(config.session, translation_api, translation_tx, translation_rx);
 
-    let res = run_app(&mut terminal, &conn, &mut app);
+    let res = run_app(&mut terminal, &db, &mut app);
 
     disable_raw_mode()?;
     crossterm::execute!(
@@ -69,7 +70,7 @@ fn main() -> io::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    conn: &Connection,
+    db: &Db,
     app: &mut App,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
@@ -80,7 +81,7 @@ fn run_app(
         let timeout = TICK_MS.saturating_sub(last_tick.elapsed().as_millis() as u64);
         if event::poll(Duration::from_millis(timeout))? {
             if let Event::Key(key) = event::read()? {
-                if handle_key(conn, app, key)? {
+                if handle_key(db, app, key)? {
                     return Ok(());
                 }
             }
@@ -93,7 +94,7 @@ fn run_app(
     }
 }
 
-fn handle_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(true);
     }
@@ -108,7 +109,7 @@ fn handle_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<boo
                 return Ok(false);
             }
             KeyCode::Char('v') => {
-                match start_review_list(conn, app) {
+                match start_review_list(db, app) {
                     Ok(()) => app.mode = Mode::ReviewList,
                     Err(err) => {
                         app.set_message(format!("Failed to load review list: {err}"));
@@ -134,13 +135,13 @@ fn handle_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<boo
     }
 
     match app.mode {
-        Mode::Menu => handle_menu_key(conn, app, key),
-        Mode::AddWord => handle_add_key(conn, app, key),
-        Mode::ReviewList => handle_review_list_key(conn, app, key),
-        Mode::Import => handle_import_key(conn, app, key),
-        Mode::ImportPreview => handle_import_preview_key(conn, app, key),
-        Mode::ChapterSelect => handle_chapter_select_key(conn, app, key),
-        Mode::Confirm => handle_confirm_key(conn, app, key),
+        Mode::Menu => handle_menu_key(db, app, key),
+        Mode::AddWord => handle_add_key(db, app, key),
+        Mode::ReviewList => handle_review_list_key(db, app, key),
+        Mode::Import => handle_import_key(db, app, key),
+        Mode::ImportPreview => handle_import_preview_key(db, app, key),
+        Mode::ChapterSelect => handle_chapter_select_key(db, app, key),
+        Mode::Confirm => handle_confirm_key(db, app, key),
         Mode::Message => {
             app.mode = Mode::AddWord;
             Ok(false)
@@ -148,7 +149,7 @@ fn handle_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<boo
     }
 }
 
-fn handle_menu_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_menu_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Char('q') => Ok(true),
         KeyCode::Char('a') => {
@@ -171,7 +172,7 @@ fn handle_menu_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Resul
             Ok(false)
         }
         KeyCode::Char('v') => {
-            match start_review_list(conn, app) {
+            match start_review_list(db, app) {
                 Ok(()) => app.mode = Mode::ReviewList,
                 Err(err) => {
                     app.set_message(format!("Failed to load review list: {err}"));
@@ -188,7 +189,7 @@ fn handle_menu_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Resul
     }
 }
 
-fn handle_review_list_key(_conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_review_list_key(_db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.mode = Mode::AddWord;
@@ -227,20 +228,20 @@ fn handle_review_list_key(_conn: &Connection, app: &mut App, key: KeyEvent) -> i
     }
 }
 
-fn handle_confirm_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_confirm_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(action) = app.confirm_action.take() {
                 app.confirm_message = None;
                 let result = match action {
-                    ConfirmAction::DeleteWord(word_id) => delete_word(conn, word_id),
-                    ConfirmAction::DeleteAll => delete_all_words(conn),
+                    ConfirmAction::DeleteWord(word_id) => db.delete_word(word_id),
+                    ConfirmAction::DeleteAll => db.delete_all_words(),
                 };
                 if let Err(err) = result {
                     app.set_message(format!("Delete failed: {err}"));
                     app.mode = Mode::Message;
                 } else {
-                    if let Err(err) = reload_review_list(conn, app) {
+                    if let Err(err) = reload_review_list(db, app) {
                         app.set_message(format!("Failed to load review list: {err}"));
                         app.mode = Mode::Message;
                     } else {
@@ -262,7 +263,7 @@ fn handle_confirm_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Re
     }
 }
 
-fn handle_add_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_add_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc => {
             app.reset_add_fields();
@@ -285,7 +286,7 @@ fn handle_add_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result
                 return Ok(false);
             }
 
-            match word_exists(conn, text, app.active_language()) {
+            match db.word_exists(text, app.active_language()) {
                 Ok(true) => {
                     app.set_message("Word already exists".to_string());
                     return Ok(false);
@@ -297,8 +298,7 @@ fn handle_add_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result
                 }
             }
 
-            if let Err(err) = save_word(
-                conn,
+            if let Err(err) = db.save_word(
                 text,
                 translation,
                 app.active_language(),
@@ -324,7 +324,7 @@ fn handle_add_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result
     }
 }
 
-fn handle_import_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_import_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc => {
             app.mode = Mode::AddWord;
@@ -348,7 +348,7 @@ fn handle_import_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Res
                 }
             };
             if chapter.is_empty() {
-                let chapters = list_chapters(conn)
+                let chapters = db.list_chapters()
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
                 if chapters.is_empty() {
                     app.set_message("No existing chapters found. Enter a chapter first.".to_string());
@@ -361,7 +361,7 @@ fn handle_import_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Res
                 return Ok(false);
             }
             let image_path = PathBuf::from("img").join(&image_name);
-            let initial_group = last_group_for_chapter(conn, chapter)
+            let initial_group = db.last_group_for_chapter(chapter)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             match run_ocr(OcrProviderKind::Vision, &image_path) {
                 Ok(lines) => match parse_grouped_items(&lines, initial_group) {
@@ -402,7 +402,7 @@ fn handle_import_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Res
     }
 }
 
-fn handle_import_preview_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_import_preview_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.mode = Mode::Import;
@@ -420,10 +420,10 @@ fn handle_import_preview_key(conn: &Connection, app: &mut App, key: KeyEvent) ->
                 app.set_message("Missing TRANSLATION_API_URL for translation".to_string());
                 return Ok(false);
             };
-            let initial_group = last_group_for_chapter(conn, chapter)
+            let initial_group = db.last_group_for_chapter(chapter)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             match import_from_image(
-                conn,
+                db,
                 api,
                 &image_path,
                 chapter,
@@ -453,7 +453,7 @@ fn handle_import_preview_key(conn: &Connection, app: &mut App, key: KeyEvent) ->
     }
 }
 
-fn handle_chapter_select_key(conn: &Connection, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_chapter_select_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.mode = Mode::Import;
@@ -483,7 +483,7 @@ fn handle_chapter_select_key(conn: &Connection, app: &mut App, key: KeyEvent) ->
             };
             app.import_chapter = chapter.clone();
             let image_path = PathBuf::from("img").join(&image_name);
-            let initial_group = last_group_for_chapter(conn, &chapter)
+            let initial_group = db.last_group_for_chapter(&chapter)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             match run_ocr(OcrProviderKind::Vision, &image_path) {
                 Ok(lines) => match parse_grouped_items(&lines, initial_group) {
@@ -1576,132 +1576,15 @@ fn load_config(path: &Path) -> io::Result<ConfigFile> {
     }
 }
 
-fn init_db(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS words (
-            id TEXT PRIMARY KEY,
-            text TEXT NOT NULL,
-            language TEXT NOT NULL,
-            translation TEXT,
-            chapter TEXT,
-            group_name TEXT,
-            sentence TEXT,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS cards (
-            id TEXT PRIMARY KEY,
-            word_id TEXT NOT NULL,
-            due_at TEXT NOT NULL,
-            interval_days INTEGER NOT NULL,
-            ease REAL NOT NULL,
-            reps INTEGER NOT NULL,
-            lapses INTEGER NOT NULL,
-            FOREIGN KEY(word_id) REFERENCES words(id)
-        );
-        CREATE TABLE IF NOT EXISTS reviews (
-            id TEXT PRIMARY KEY,
-            card_id TEXT NOT NULL,
-            grade INTEGER NOT NULL,
-            reviewed_at TEXT NOT NULL,
-            FOREIGN KEY(card_id) REFERENCES cards(id)
-        );",
-    )?;
-    ensure_word_columns(conn)?;
-    Ok(())
-}
 
-fn ensure_word_columns(conn: &Connection) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(words)")?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    let mut existing = std::collections::HashSet::new();
-    for column in columns {
-        existing.insert(column?);
-    }
-
-    let mut missing = Vec::new();
-    if !existing.contains("translation") {
-        missing.push("ALTER TABLE words ADD COLUMN translation TEXT");
-    }
-    if !existing.contains("chapter") {
-        missing.push("ALTER TABLE words ADD COLUMN chapter TEXT");
-    }
-    if !existing.contains("group_name") {
-        missing.push("ALTER TABLE words ADD COLUMN group_name TEXT");
-    }
-    for stmt in missing {
-        conn.execute(stmt, [])?;
-    }
-    Ok(())
-}
-
-fn save_word(
-    conn: &Connection,
-    text: &str,
-    translation: &str,
-    language: Language,
-    chapter: Option<&str>,
-    group: Option<&str>,
-) -> rusqlite::Result<()> {
-    let now = Utc::now();
-    let word = Word {
-        id: Uuid::new_v4(),
-        text: text.to_string(),
-        translation: Some(translation.to_string()),
-        chapter: chapter.map(|value| value.to_string()),
-        group: group.map(|value| value.to_string()),
-        language,
-        sentence: None,
-        created_at: now,
-    };
-
-    let card = default_new_card(word.id, now);
-
-    conn.execute(
-        "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            word.id.to_string(),
-            word.text,
-            format!("{:?}", word.language),
-            word.translation,
-            word.chapter,
-            word.group,
-            word.sentence,
-            word.created_at.to_rfc3339()
-        ],
-    )?;
-
-    conn.execute(
-        "INSERT INTO cards (id, word_id, due_at, interval_days, ease, reps, lapses) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            card.id.to_string(),
-            card.word_id.to_string(),
-            card.due_at.to_rfc3339(),
-            card.interval_days,
-            card.ease,
-            card.reps,
-            card.lapses
-        ],
-    )?;
-
-    Ok(())
-}
-
-fn word_exists(conn: &Connection, text: &str, language: Language) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT 1 FROM words WHERE lower(text) = lower(?1) AND language = ?2 LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![text, format!("{:?}", language)])?;
-    Ok(rows.next()?.is_some())
-}
-
-fn start_review_list(conn: &Connection, app: &mut App) -> rusqlite::Result<()> {
-    app.review_list = load_all_words(conn)?;
+fn start_review_list(db: &Db, app: &mut App) -> rusqlite::Result<()> {
+    app.review_list = db.load_all_words()?;
     app.review_list_selection = 0;
     Ok(())
 }
 
-fn reload_review_list(conn: &Connection, app: &mut App) -> rusqlite::Result<()> {
-    let words = load_all_words(conn)?;
+fn reload_review_list(db: &Db, app: &mut App) -> rusqlite::Result<()> {
+    let words = db.load_all_words()?;
     app.review_list = words;
     if app.review_list.is_empty() {
         app.review_list_selection = 0;
@@ -1716,39 +1599,6 @@ fn reload_review_list(conn: &Connection, app: &mut App) -> rusqlite::Result<()> 
     Ok(())
 }
 
-fn load_all_words(conn: &Connection) -> rusqlite::Result<Vec<Word>> {
-    let mut words = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT id, text, language, translation, chapter, group_name, sentence, created_at
-         FROM words
-         ORDER BY chapter, group_name, created_at",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let language = match row.get::<_, String>(2)?.as_str() {
-            "Dutch" => Language::Dutch,
-            _ => Language::English,
-        };
-        let created_at = DateTime::parse_from_rfc3339(row.get::<_, String>(7)?.as_str())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
-        Ok(Word {
-            id: Uuid::parse_str(row.get::<_, String>(0)?.as_str()).unwrap_or_else(|_| Uuid::new_v4()),
-            text: row.get(1)?,
-            language,
-            translation: row.get(3)?,
-            chapter: row.get(4)?,
-            group: row.get(5)?,
-            sentence: row.get(6)?,
-            created_at,
-        })
-    })?;
-
-    for word in rows {
-        words.push(word?);
-    }
-
-    Ok(words)
-}
 
 fn review_group_key(word: &Word) -> String {
     let chapter = word.chapter.as_deref().unwrap_or("Unassigned");
@@ -1797,60 +1647,8 @@ fn build_preview_lines(items: &[ImportItem]) -> Vec<String> {
     lines
 }
 
-fn list_chapters(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut chapters = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT chapter
-         FROM words
-         WHERE chapter IS NOT NULL AND trim(chapter) != ''
-         ORDER BY chapter",
-    )?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    for row in rows {
-        chapters.push(row?);
-    }
-    Ok(chapters)
-}
-
-fn last_group_for_chapter(conn: &Connection, chapter: &str) -> rusqlite::Result<Option<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT group_name
-         FROM words
-         WHERE chapter = ?1 AND group_name IS NOT NULL AND trim(group_name) != ''
-         ORDER BY created_at DESC
-         LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![chapter])?;
-    if let Some(row) = rows.next()? {
-        let value: String = row.get(0)?;
-        Ok(Some(value))
-    } else {
-        Ok(None)
-    }
-}
-
-fn delete_word(conn: &Connection, word_id: Uuid) -> rusqlite::Result<()> {
-    let id = word_id.to_string();
-    conn.execute(
-        "DELETE FROM reviews WHERE card_id IN (SELECT id FROM cards WHERE word_id = ?1)",
-        params![id],
-    )?;
-    conn.execute("DELETE FROM cards WHERE word_id = ?1", params![word_id.to_string()])?;
-    conn.execute("DELETE FROM words WHERE id = ?1", params![word_id.to_string()])?;
-    Ok(())
-}
-
-fn delete_all_words(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "DELETE FROM reviews;
-         DELETE FROM cards;
-         DELETE FROM words;",
-    )?;
-    Ok(())
-}
-
 fn import_from_image(
-    conn: &Connection,
+    db: &Db,
     api: &TranslationApi,
     image_path: &Path,
     chapter: &str,
@@ -1873,14 +1671,14 @@ fn import_from_image(
         let texts: Vec<&str> = chunk.iter().map(|item| item.text.as_str()).collect();
         let translations = translate_batch_via_api(api, &texts, "NL", "EN")?;
         for (item, translation) in chunk.iter().zip(translations) {
-            if word_exists(conn, &item.text, Language::Dutch)
+            if db
+                .word_exists(&item.text, Language::Dutch)
                 .map_err(|err| format!("Failed to check duplicates: {err}"))?
             {
                 skipped += 1;
                 continue;
             }
-            save_word(
-                conn,
+            db.save_word(
                 &item.text,
                 &translation,
                 Language::Dutch,
