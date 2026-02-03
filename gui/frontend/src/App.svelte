@@ -81,6 +81,11 @@
     }
   }
 
+  function handleGradeTap(event, value) {
+    event.preventDefault()
+    grade(value)
+  }
+
   function reveal() {
     showAnswer = true
   }
@@ -203,7 +208,8 @@
         <button
           class="grade"
           disabled={!showAnswer || loading}
-          on:click={() => grade(grade.value)}>
+          on:click={(event) => handleGradeTap(event, grade.value)}
+          on:touchend={(event) => handleGradeTap(event, grade.value)}>
           <span>{grade.label}</span>
           <small>{grade.value === 5 ? '4' : grade.value === 4 ? '3' : grade.value === 3 ? '2' : '1'}</small>
         </button>
@@ -314,6 +320,8 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
   .grade:disabled {
     opacity: 0.5;
