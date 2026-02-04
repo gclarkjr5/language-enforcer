@@ -16,6 +16,9 @@ rusqlite = { version = "0.31", features = ["chrono", "uuid"] }
 uuid = "1"
 le_core = { path = "../../core" }
 rand = "0.8"
+native-tls = "0.2"
+postgres = "0.19"
+postgres-native-tls = "0.5"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

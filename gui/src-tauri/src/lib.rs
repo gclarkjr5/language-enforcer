@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use le_core::{schedule_sm2, Card};
+use native_tls::TlsConnector;
+use postgres::Client;
+use postgres_native_tls::MakeTlsConnector;
 use rand::seq::SliceRandom;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -36,6 +39,13 @@ struct ReportInput {
     translation: Option<String>,
     note: Option<String>,
     reported_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CorrectionInput {
+    word_id: String,
+    text: Option<String>,
+    translation: Option<String>,
 }
 
 #[derive(Default)]
@@ -78,10 +88,8 @@ fn app_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let db_path = dir.join("words.db");
 
 
-    if !db_path.exists() {
-        if let Some(seed) = find_seed_db(app) {
-            std::fs::copy(&seed, &db_path).map_err(|err| err.to_string())?;
-        }
+    if !db_path.exists() && let Some(seed) = find_seed_db(app) {
+        std::fs::copy(&seed, &db_path).map_err(|err| err.to_string())?;
     }
     Ok(db_path)
 }
@@ -120,6 +128,55 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
     )?;
     ensure_seen_count(&conn)?;
     Ok(conn)
+}
+
+fn postgres_url() -> Result<String, String> {
+    std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required for Postgres sync".to_string())
+}
+
+fn open_postgres() -> Result<Client, String> {
+    let url = postgres_url()?;
+    let connector = TlsConnector::new().map_err(|err| err.to_string())?;
+    let connector = MakeTlsConnector::new(connector);
+    Client::connect(&url, connector).map_err(|err| err.to_string())
+}
+
+fn sql_log_path() -> Option<String> {
+    std::env::var("LOG_SQL_PATH").ok()
+}
+
+fn log_sql(query: &str, params: &[(&str, String)]) {
+    let Some(path) = sql_log_path() else {
+        return;
+    };
+    let mut line = String::new();
+    line.push_str("[sql] ");
+    line.push_str(query);
+    for (name, value) in params {
+        line.push_str("\n  - ");
+        line.push_str(name);
+        line.push_str(" = ");
+        line.push_str(value);
+    }
+    line.push('\n');
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn log_error(message: &str) {
+    let Some(path) = sql_log_path() else {
+        return;
+    };
+    let mut line = String::new();
+    line.push_str("[error] ");
+    line.push_str(message);
+    line.push('\n');
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 fn ensure_seen_count(conn: &Connection) -> rusqlite::Result<()> {
@@ -289,6 +346,213 @@ fn report_issue(app: tauri::AppHandle, input: ReportInput) -> Result<(), String>
 }
 
 #[command]
+fn apply_correction(app: tauri::AppHandle, input: CorrectionInput) -> Result<(), String> {
+    if input.text.is_none() && input.translation.is_none() {
+        return Ok(());
+    }
+
+    let mut client = open_postgres()?;
+    let affected = match (input.text.as_ref(), input.translation.as_ref()) {
+        (Some(text), Some(translation)) => {
+            log_sql(
+                "UPDATE words SET text = $1, translation = $2 WHERE id = $3",
+                &[
+                    ("text", text.to_string()),
+                    ("translation", translation.to_string()),
+                    ("id", input.word_id.clone()),
+                ],
+            );
+            client.execute(
+                "UPDATE words SET text = $1, translation = $2 WHERE id = $3",
+                &[text, translation, &input.word_id],
+            )
+        }
+        (Some(text), None) => {
+            log_sql(
+                "UPDATE words SET text = $1 WHERE id = $2",
+                &[("text", text.to_string()), ("id", input.word_id.clone())],
+            );
+            client.execute("UPDATE words SET text = $1 WHERE id = $2", &[text, &input.word_id])
+        }
+        (None, Some(translation)) => {
+            log_sql(
+                "UPDATE words SET translation = $1 WHERE id = $2",
+                &[
+                    ("translation", translation.to_string()),
+                    ("id", input.word_id.clone()),
+                ],
+            );
+            client.execute(
+                "UPDATE words SET translation = $1 WHERE id = $2",
+                &[translation, &input.word_id],
+            )
+        }
+        (None, None) => Ok(0),
+    }
+    .map_err(|err| err.to_string())?;
+
+    if affected == 0 {
+        return Err("Word not found in Postgres".to_string());
+    }
+
+    let db_path = app_db_path(&app)?;
+    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    if let Some(text) = input.text.as_ref() {
+        conn.execute(
+            "UPDATE words SET text = ?1 WHERE id = ?2",
+            params![text, &input.word_id],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    if let Some(translation) = input.translation.as_ref() {
+        conn.execute(
+            "UPDATE words SET translation = ?1 WHERE id = ?2",
+            params![translation, &input.word_id],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+#[command]
+fn refresh_from_postgres(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<ReviewState>>,
+) -> Result<(i64, i64, i64), String> {
+    let mut client = open_postgres()?;
+    let db_path = app_db_path(&app)?;
+    let mut conn = open_db(&db_path).map_err(|err| err.to_string())?;
+
+    let tx = conn.transaction().map_err(|err| {
+        let message = format!("refresh_from_postgres: begin transaction failed: {err}");
+        log_error(&message);
+        message
+    })?;
+    let query = "DELETE FROM reviews; DELETE FROM cards; DELETE FROM words;";
+    log_sql(query, &[]);
+    tx.execute_batch(query).map_err(|err| {
+        let message = format!("refresh_from_postgres: clear sqlite tables failed: {err}");
+        log_error(&message);
+        message
+    })?;
+
+    let mut word_count = 0i64;
+    let mut card_count = 0i64;
+    let mut review_count = 0i64;
+
+    log_sql(
+        "SELECT id, text, language, translation, chapter, group_name, sentence, created_at FROM words",
+        &[],
+    );
+    let word_rows = client
+        .query(
+            "SELECT id, text, language, translation, chapter, group_name, sentence, created_at FROM words",
+            &[],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_postgres: select words failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    for row in word_rows {
+        tx.execute(
+            "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+                row.get::<_, Option<String>>(3),
+                row.get::<_, Option<String>>(4),
+                row.get::<_, Option<String>>(5),
+                row.get::<_, Option<String>>(6),
+                row.get::<_, String>(7),
+            ],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_postgres: insert word failed: {err}");
+            log_error(&message);
+            message
+        })?;
+        word_count += 1;
+    }
+
+    log_sql(
+        "SELECT id, word_id, due_at, interval_days, ease, reps, lapses FROM cards",
+        &[],
+    );
+    let card_rows = client
+        .query(
+            "SELECT id, word_id, due_at, interval_days, ease, reps, lapses FROM cards",
+            &[],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_postgres: select cards failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    for row in card_rows {
+        tx.execute(
+            "INSERT INTO cards (id, word_id, due_at, interval_days, ease, reps, lapses, seen_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            params![
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+                row.get::<_, i32>(3),
+                row.get::<_, f64>(4),
+                row.get::<_, i32>(5),
+                row.get::<_, i32>(6),
+            ],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_postgres: insert card failed: {err}");
+            log_error(&message);
+            message
+        })?;
+        card_count += 1;
+    }
+
+    log_sql("SELECT id, card_id, grade, reviewed_at FROM reviews", &[]);
+    let review_rows = client
+        .query("SELECT id, card_id, grade, reviewed_at FROM reviews", &[])
+        .map_err(|err| {
+            let message = format!("refresh_from_postgres: select reviews failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    for row in review_rows {
+        tx.execute(
+            "INSERT INTO reviews (id, card_id, grade, reviewed_at) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, i32>(2),
+                row.get::<_, String>(3),
+            ],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_postgres: insert review failed: {err}");
+            log_error(&message);
+            message
+        })?;
+        review_count += 1;
+    }
+
+    tx.commit().map_err(|err| {
+        let message = format!("refresh_from_postgres: commit failed: {err}");
+        log_error(&message);
+        message
+    })?;
+
+    if let Ok(mut guard) = state.lock() {
+        guard.queue.clear();
+    }
+
+    Ok((word_count, card_count, review_count))
+}
+
+#[command]
 fn counts(app: tauri::AppHandle) -> Result<(i64, i64), String> {
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
@@ -317,6 +581,8 @@ pub fn run() {
             next_due_card,
             grade_card,
             report_issue,
+            apply_correction,
+            refresh_from_postgres,
             counts
         ])
         .run(tauri::generate_context!())

@@ -26,7 +26,7 @@ pub struct Card {
     pub word_id: Uuid,
     pub due_at: DateTime<Utc>,
     pub interval_days: i32,
-    pub ease: f32,
+    pub ease: f64,
     pub reps: i32,
     pub lapses: i32,
 }
@@ -90,7 +90,7 @@ pub fn schedule_sm2(card: &mut Card, grade: u8, now: DateTime<Utc>) -> DateTime<
     let quality = clamped as f32;
 
     let ease_delta = 0.1 - (5.0 - quality) * (0.08 + (5.0 - quality) * 0.02);
-    card.ease = (card.ease + ease_delta).max(1.3);
+    card.ease = (card.ease + ease_delta as f64).max(1.3);
 
     if clamped < 3 {
         card.reps = 0;
@@ -101,7 +101,7 @@ pub fn schedule_sm2(card: &mut Card, grade: u8, now: DateTime<Utc>) -> DateTime<
         card.interval_days = match card.reps {
             1 => 1,
             2 => 6,
-            _ => ((card.interval_days as f32) * card.ease).round() as i32,
+            _ => ((card.interval_days as f64) * card.ease).round() as i32,
         };
     }
 

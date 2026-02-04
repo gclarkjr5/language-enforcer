@@ -113,9 +113,9 @@ impl Db for PostgresDb {
         let created_at = word.created_at.to_rfc3339();
         let due_at = card.due_at.to_rfc3339();
         let interval_days = card.interval_days;
-        let ease = f64::from(card.ease);
-        let reps = i64::from(card.reps);
-        let lapses = i64::from(card.lapses);
+        let ease = card.ease;
+        let reps = card.reps;
+        let lapses = card.lapses;
 
         let mut client = self
             .client
@@ -174,20 +174,18 @@ impl Db for PostgresDb {
         let card_id = card.id.to_string();
         let word_id = card.word_id.to_string();
 
-                // "INSERT INTO cards (id, word_id, due_at, interval_days, ease, reps, lapses)
-                //  VALUES ($1, $2, $3, $4, $5, $6, $7)",
         client
             .execute(
-                "INSERT INTO cards (id, word_id, due_at, interval_days)
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO cards (id, word_id, due_at, interval_days, ease, reps, lapses)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 &[
                     &card_id,
                     &word_id,
                     &due_at,
                     &interval_days,
-                    // &ease.to_string(),
-                    // &reps.to_string(),
-                    // &lapses.to_string(),
+                    &ease,
+                    &reps,
+                    &lapses,
                 ],
             )
             .map_err(|err| {

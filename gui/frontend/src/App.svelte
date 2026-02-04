@@ -13,6 +13,9 @@
   let reviewedThisSession = 0
   let reportNote = ''
   let showReport = false
+  let showFix = false
+  let fixText = ''
+  let fixTranslation = ''
 
   const grades = [
     { label: 'Again', value: 1 },
@@ -118,6 +121,62 @@
     }
   }
 
+  function openFix() {
+    if (!current) return
+    fixText = current.text ?? ''
+    fixTranslation = current.translation ?? ''
+    showFix = true
+  }
+
+  async function submitFix() {
+    if (!current) return
+    loading = true
+    error = ''
+    const nextText = fixText.trim()
+    const nextTranslation = fixTranslation.trim()
+    const textChanged = nextText !== current.text
+    const translationChanged = nextTranslation !== (current.translation ?? '')
+    if (!textChanged && !translationChanged) {
+      showFix = false
+      loading = false
+      return
+    }
+    try {
+      await invoke('apply_correction', {
+        input: {
+          word_id: current.word_id,
+          text: textChanged ? nextText : null,
+          translation: translationChanged ? nextTranslation : null
+        }
+      })
+      if (textChanged) current.text = nextText
+      if (translationChanged) current.translation = nextTranslation
+      showFix = false
+    } catch (err) {
+      error = String(err)
+    } finally {
+      loading = false
+    }
+  }
+
+  async function syncFromPostgres() {
+    loading = true
+    error = ''
+    showSessionPrompt = false
+    try {
+      await invoke('refresh_from_postgres')
+      reviewedThisSession = 0
+      sessionActive = true
+      await invoke('start_session')
+      await refreshCounts()
+      await loadNext()
+    } catch (err) {
+      error = String(err)
+    } finally {
+      loading = false
+    }
+  }
+
   function handleKey(event) {
     if (!current) return
     if (!showAnswer && (event.key === ' ' || event.key === 'Enter')) {
@@ -150,7 +209,10 @@
       <h1>Language Enforcer Review</h1>
       <p class="meta">Due: {dueCount} / {totalCount}</p>
     </div>
-    <button class="ghost" on:click={loadNext} disabled={loading}>Refresh</button>
+    <div class="header-actions">
+      <button class="ghost" on:click={syncFromPostgres} disabled={loading}>Sync Postgres</button>
+      <button class="ghost" on:click={loadNext} disabled={loading}>Refresh</button>
+    </div>
   </header>
 
   {#if error}
@@ -184,6 +246,26 @@
     </div>
   {/if}
 
+  {#if showFix}
+    <div class="modal-backdrop">
+      <div class="modal">
+        <h2>Fix card</h2>
+        <label class="field">
+          <span>Dutch</span>
+          <input bind:value={fixText} placeholder="Dutch word" />
+        </label>
+        <label class="field">
+          <span>English</span>
+          <input bind:value={fixTranslation} placeholder="English translation" />
+        </label>
+        <div class="modal-actions">
+          <button class="grade" on:click={submitFix} disabled={loading}>Save</button>
+          <button class="ghost" on:click={() => (showFix = false)} disabled={loading}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if loading}
     <div class="card">Loading…</div>
   {:else if !current}
@@ -201,6 +283,7 @@
         <button class="reveal" on:click={reveal}>Show answer</button>
       {/if}
       <button class="report" on:click={openReport}>Report issue</button>
+      <button class="report" on:click={openFix}>Fix text</button>
     </div>
 
     <div class="actions">
@@ -237,6 +320,10 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: 24px;
+  }
+  .header-actions {
+    display: flex;
+    gap: 12px;
   }
   h1 {
     margin: 0 0 6px;
@@ -309,6 +396,25 @@
     border-radius: 10px;
     padding: 10px;
     resize: vertical;
+  }
+  input {
+    width: 100%;
+    background: #0f172a;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 10px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .field span {
+    color: #94a3b8;
+    font-size: 12px;
+    letter-spacing: 0.02em;
   }
   .grade {
     background: #1f2937;
