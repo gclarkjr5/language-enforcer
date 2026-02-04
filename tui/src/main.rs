@@ -12,6 +12,7 @@ use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use directories::ProjectDirs;
+use dotenvy::dotenv;
 use le_core::{Language, SessionConfig, Word};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -23,12 +24,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod db;
-use crate::db::Db;
+use crate::db::{get_db_backend, Db, DbResult};
 
 const TICK_MS: u64 = 100;
 const TRANSLATE_DEBOUNCE_MS: u64 = 400;
 
 fn main() -> io::Result<()> {
+    dotenv().ok();
+    // ensure translation api is engaged
+    let translation_api = TranslationApi::from_env().ok().map(Arc::new);
+
     let data_dir = ProjectDirs::from("com", "languageenforcer", "Language Enforcer")
         .map(|dirs| dirs.data_local_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("./data"));
@@ -37,7 +42,7 @@ fn main() -> io::Result<()> {
     let db_path = data_dir.join("words.db");
     let config_path = data_dir.join("config.toml");
 
-    let db = Db::open(&db_path).expect("Error connecting to db");
+    let db = get_db_backend(&db_path).expect("Error connecting to db");
     db.init().expect("Error initializing db");
 
     let config = load_config(&config_path)?;
@@ -48,11 +53,10 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let translation_api = TranslationApi::from_env().ok().map(Arc::new);
     let (translation_tx, translation_rx) = mpsc::channel();
     let mut app = App::new(config.session, translation_api, translation_tx, translation_rx);
 
-    let res = run_app(&mut terminal, &db, &mut app);
+    let res = run_app(&mut terminal, db.as_ref(), &mut app);
 
     disable_raw_mode()?;
     crossterm::execute!(
@@ -70,7 +74,7 @@ fn main() -> io::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    db: &Db,
+    db: &dyn Db,
     app: &mut App,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
@@ -94,7 +98,7 @@ fn run_app(
     }
 }
 
-fn handle_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Ok(true);
     }
@@ -149,7 +153,7 @@ fn handle_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     }
 }
 
-fn handle_menu_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_menu_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Char('q') => Ok(true),
         KeyCode::Char('a') => {
@@ -189,7 +193,7 @@ fn handle_menu_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     }
 }
 
-fn handle_review_list_key(_db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_review_list_key(_db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.mode = Mode::AddWord;
@@ -228,7 +232,7 @@ fn handle_review_list_key(_db: &Db, app: &mut App, key: KeyEvent) -> io::Result<
     }
 }
 
-fn handle_confirm_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_confirm_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(action) = app.confirm_action.take() {
@@ -263,7 +267,7 @@ fn handle_confirm_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool>
     }
 }
 
-fn handle_add_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_add_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc => {
             app.reset_add_fields();
@@ -324,7 +328,7 @@ fn handle_add_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     }
 }
 
-fn handle_import_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_import_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc => {
             app.mode = Mode::AddWord;
@@ -402,7 +406,7 @@ fn handle_import_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> 
     }
 }
 
-fn handle_import_preview_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_import_preview_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.mode = Mode::Import;
@@ -453,7 +457,7 @@ fn handle_import_preview_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Resul
     }
 }
 
-fn handle_chapter_select_key(db: &Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+fn handle_chapter_select_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.mode = Mode::Import;
@@ -1577,13 +1581,13 @@ fn load_config(path: &Path) -> io::Result<ConfigFile> {
 }
 
 
-fn start_review_list(db: &Db, app: &mut App) -> rusqlite::Result<()> {
+fn start_review_list(db: &dyn Db, app: &mut App) -> DbResult<()> {
     app.review_list = db.load_all_words()?;
     app.review_list_selection = 0;
     Ok(())
 }
 
-fn reload_review_list(db: &Db, app: &mut App) -> rusqlite::Result<()> {
+fn reload_review_list(db: &dyn Db, app: &mut App) -> DbResult<()> {
     let words = db.load_all_words()?;
     app.review_list = words;
     if app.review_list.is_empty() {
@@ -1648,7 +1652,7 @@ fn build_preview_lines(items: &[ImportItem]) -> Vec<String> {
 }
 
 fn import_from_image(
-    db: &Db,
+    db: &dyn Db,
     api: &TranslationApi,
     image_path: &Path,
     chapter: &str,
@@ -1685,7 +1689,17 @@ fn import_from_image(
                 Some(chapter),
                 Some(&item.group),
             )
-            .map_err(|err| format!("Failed to save word: {err}"))?;
+            .map_err(|err| {
+                let detail = format!(
+                    "Import save_word failed: {err} (word='{}', translation='{}', chapter='{}', group='{}')",
+                    item.text,
+                    translation,
+                    chapter,
+                    item.group
+                );
+                crate::db::log_error(&detail);
+                format!("Failed to save word: {err}")
+            })?;
             inserted += 1;
         }
         index = end;

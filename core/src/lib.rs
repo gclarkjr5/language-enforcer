@@ -25,10 +25,10 @@ pub struct Card {
     pub id: Uuid,
     pub word_id: Uuid,
     pub due_at: DateTime<Utc>,
-    pub interval_days: i64,
+    pub interval_days: i32,
     pub ease: f32,
-    pub reps: u32,
-    pub lapses: u32,
+    pub reps: i32,
+    pub lapses: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,10 +101,10 @@ pub fn schedule_sm2(card: &mut Card, grade: u8, now: DateTime<Utc>) -> DateTime<
         card.interval_days = match card.reps {
             1 => 1,
             2 => 6,
-            _ => ((card.interval_days as f32) * card.ease).round() as i64,
+            _ => ((card.interval_days as f32) * card.ease).round() as i32,
         };
     }
 
-    card.due_at = now + Duration::days(card.interval_days.max(1));
+    card.due_at = now + Duration::days(card.interval_days.max(1).into());
     card.due_at
 }

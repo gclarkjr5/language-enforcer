@@ -8,7 +8,11 @@ arboard = "3"
 chrono = "0.4"
 crossterm = "0.27"
 directories = "5"
+dotenvy = "0.15"
 le_core = { path = "../core" }
+native-tls = "0.2"
+postgres = { version = "0.19", features = ["with-chrono-0_4"] }
+postgres-native-tls = "0.5"
 ratatui = "0.27"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 rusqlite = { version = "0.31", features = ["chrono", "uuid"] }

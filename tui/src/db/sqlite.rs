@@ -6,6 +6,8 @@ use le_core::{default_new_card, Language, Word};
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
+use crate::db::{Db, DbResult};
+
 pub struct SqliteDb {
     conn: Connection,
 }
@@ -16,7 +18,33 @@ impl SqliteDb {
         Ok(Self { conn })
     }
 
-    pub fn init(&self) -> rusqlite::Result<()> {
+    fn ensure_word_columns(&self) -> rusqlite::Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(words)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut existing = HashSet::new();
+        for column in columns {
+            existing.insert(column?);
+        }
+
+        let mut missing = Vec::new();
+        if !existing.contains("translation") {
+            missing.push("ALTER TABLE words ADD COLUMN translation TEXT");
+        }
+        if !existing.contains("chapter") {
+            missing.push("ALTER TABLE words ADD COLUMN chapter TEXT");
+        }
+        if !existing.contains("group_name") {
+            missing.push("ALTER TABLE words ADD COLUMN group_name TEXT");
+        }
+        for stmt in missing {
+            self.conn.execute(stmt, [])?;
+        }
+        Ok(())
+    }
+}
+
+impl Db for SqliteDb {
+    fn init(&self) -> DbResult<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS words (
                 id TEXT PRIMARY KEY,
@@ -50,38 +78,14 @@ impl SqliteDb {
         Ok(())
     }
 
-    fn ensure_word_columns(&self) -> rusqlite::Result<()> {
-        let mut stmt = self.conn.prepare("PRAGMA table_info(words)")?;
-        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        let mut existing = HashSet::new();
-        for column in columns {
-            existing.insert(column?);
-        }
-
-        let mut missing = Vec::new();
-        if !existing.contains("translation") {
-            missing.push("ALTER TABLE words ADD COLUMN translation TEXT");
-        }
-        if !existing.contains("chapter") {
-            missing.push("ALTER TABLE words ADD COLUMN chapter TEXT");
-        }
-        if !existing.contains("group_name") {
-            missing.push("ALTER TABLE words ADD COLUMN group_name TEXT");
-        }
-        for stmt in missing {
-            self.conn.execute(stmt, [])?;
-        }
-        Ok(())
-    }
-
-    pub fn save_word(
+    fn save_word(
         &self,
         text: &str,
         translation: &str,
         language: Language,
         chapter: Option<&str>,
         group: Option<&str>,
-    ) -> rusqlite::Result<()> {
+    ) -> DbResult<()> {
         let now = Utc::now();
         let word = Word {
             id: Uuid::new_v4(),
@@ -126,7 +130,7 @@ impl SqliteDb {
         Ok(())
     }
 
-    pub fn word_exists(&self, text: &str, language: Language) -> rusqlite::Result<bool> {
+    fn word_exists(&self, text: &str, language: Language) -> DbResult<bool> {
         let mut stmt = self
             .conn
             .prepare("SELECT 1 FROM words WHERE lower(text) = lower(?1) AND language = ?2 LIMIT 1")?;
@@ -134,7 +138,7 @@ impl SqliteDb {
         Ok(rows.next()?.is_some())
     }
 
-    pub fn load_all_words(&self) -> rusqlite::Result<Vec<Word>> {
+    fn load_all_words(&self) -> DbResult<Vec<Word>> {
         let mut words = Vec::new();
         let mut stmt = self.conn.prepare(
             "SELECT id, text, language, translation, chapter, group_name, sentence, created_at
@@ -169,7 +173,7 @@ impl SqliteDb {
         Ok(words)
     }
 
-    pub fn list_chapters(&self) -> rusqlite::Result<Vec<String>> {
+    fn list_chapters(&self) -> DbResult<Vec<String>> {
         let mut chapters = Vec::new();
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT chapter
@@ -184,7 +188,7 @@ impl SqliteDb {
         Ok(chapters)
     }
 
-    pub fn last_group_for_chapter(&self, chapter: &str) -> rusqlite::Result<Option<String>> {
+    fn last_group_for_chapter(&self, chapter: &str) -> DbResult<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT group_name
              FROM words
@@ -201,7 +205,7 @@ impl SqliteDb {
         }
     }
 
-    pub fn delete_word(&self, word_id: Uuid) -> rusqlite::Result<()> {
+    fn delete_word(&self, word_id: Uuid) -> DbResult<()> {
         let id = word_id.to_string();
         self.conn.execute(
             "DELETE FROM reviews WHERE card_id IN (SELECT id FROM cards WHERE word_id = ?1)",
@@ -212,7 +216,7 @@ impl SqliteDb {
         Ok(())
     }
 
-    pub fn delete_all_words(&self) -> rusqlite::Result<()> {
+    fn delete_all_words(&self) -> DbResult<()> {
         self.conn.execute_batch(
             "DELETE FROM reviews;
              DELETE FROM cards;
