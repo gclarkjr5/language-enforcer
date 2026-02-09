@@ -1,6 +1,12 @@
 <script>
   import { onMount, onDestroy } from 'svelte'
   import { invoke } from '@tauri-apps/api/core'
+  import {
+    startLogin,
+    clearAuth,
+    getAuthState,
+    testDataApiRequest
+  } from './lib/auth.js'
 
   let current = null
   let showAnswer = false
@@ -16,6 +22,8 @@
   let showFix = false
   let fixText = ''
   let fixTranslation = ''
+  let authError = ''
+  let apiResult = ''
 
   const grades = [
     { label: 'Again', value: 1 },
@@ -192,6 +200,32 @@
     }
   }
 
+  async function beginAuth() {
+    authError = ''
+    try {
+      await startLogin()
+    } catch (err) {
+      authError = String(err)
+    }
+  }
+
+  function signOut() {
+    clearAuth()
+    authError = ''
+    apiResult = ''
+  }
+
+  async function pingDataApi() {
+    authError = ''
+    apiResult = ''
+    try {
+      const result = await testDataApiRequest()
+      apiResult = JSON.stringify(result, null, 2)
+    } catch (err) {
+      authError = String(err)
+    }
+  }
+
   onMount(async () => {
     window.addEventListener('keydown', handleKey)
     await refreshCounts()
@@ -214,6 +248,32 @@
       <button class="ghost" on:click={loadNext} disabled={loading}>Refresh</button>
     </div>
   </header>
+
+  <section class="auth">
+    <div>
+      <h2>Neon Auth (OAuth + PKCE)</h2>
+      <p class="meta">
+        Replace the placeholder URLs in <code>auth.js</code>. The SDK handles tokens; this app does
+        not persist them explicitly.
+      </p>
+    </div>
+    <div class="auth-actions">
+      <button class="ghost" on:click={beginAuth}>Start sign-in</button>
+      <button class="ghost" on:click={signOut}>Clear state</button>
+      <button class="ghost" on:click={pingDataApi}>Test Data API</button>
+    </div>
+    {#if getAuthState() === 'signed_in'}
+      <div class="auth-step">
+        <span class="pill">Signed in</span>
+      </div>
+    {/if}
+    {#if authError}
+      <div class="error">{authError}</div>
+    {/if}
+    {#if apiResult}
+      <pre class="api-result">{apiResult}</pre>
+    {/if}
+  </section>
 
   {#if error}
     <div class="error">{error}</div>
@@ -340,6 +400,47 @@
     padding: 8px 14px;
     border-radius: 8px;
     cursor: pointer;
+  }
+  .auth {
+    background: #0b1220;
+    border: 1px solid #1f2a44;
+    border-radius: 16px;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+    display: grid;
+    gap: 12px;
+  }
+  .auth h2 {
+    margin: 0 0 6px;
+    font-size: 18px;
+  }
+  .auth-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .auth-step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .pill {
+    background: #1e293b;
+    color: #93c5fd;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+  }
+  .api-result {
+    background: #0f172a;
+    border: 1px solid #1f2a44;
+    color: #e2e8f0;
+    border-radius: 12px;
+    padding: 12px;
+    margin: 0;
+    font-size: 12px;
+    overflow-x: auto;
   }
   .card {
     background: #111827;
