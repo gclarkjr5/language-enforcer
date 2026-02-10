@@ -83,7 +83,12 @@ impl Db for PostgresDb {
                 card_id TEXT NOT NULL REFERENCES cards(id),
                 grade INTEGER NOT NULL,
                 reviewed_at TEXT NOT NULL
-            );",
+            );
+            GRANT USAGE ON SCHEMA public TO authenticated;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON public.words TO authenticated;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON public.cards TO authenticated;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON public.reviews TO authenticated;
+            ",
         )?;
         Ok(())
     }

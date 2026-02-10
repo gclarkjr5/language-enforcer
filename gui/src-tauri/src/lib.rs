@@ -48,6 +48,44 @@ struct CorrectionInput {
     translation: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WordRow {
+    id: String,
+    text: String,
+    language: String,
+    translation: Option<String>,
+    chapter: Option<String>,
+    group_name: Option<String>,
+    sentence: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CardRow {
+    id: String,
+    word_id: String,
+    due_at: String,
+    interval_days: i32,
+    ease: f64,
+    reps: i32,
+    lapses: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewRow {
+    id: String,
+    card_id: String,
+    grade: i32,
+    reviewed_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DataApiSnapshot {
+    words: Vec<WordRow>,
+    cards: Vec<CardRow>,
+    reviews: Vec<ReviewRow>,
+}
+
 #[derive(Default)]
 struct ReviewState {
     queue: Vec<String>,
@@ -415,6 +453,30 @@ fn apply_correction(app: tauri::AppHandle, input: CorrectionInput) -> Result<(),
 }
 
 #[command]
+fn apply_correction_local(app: tauri::AppHandle, input: CorrectionInput) -> Result<(), String> {
+    if input.text.is_none() && input.translation.is_none() {
+        return Ok(());
+    }
+    let db_path = app_db_path(&app)?;
+    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    if let Some(text) = input.text.as_ref() {
+        conn.execute(
+            "UPDATE words SET text = ?1 WHERE id = ?2",
+            params![text, &input.word_id],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    if let Some(translation) = input.translation.as_ref() {
+        conn.execute(
+            "UPDATE words SET translation = ?1 WHERE id = ?2",
+            params![translation, &input.word_id],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+#[command]
 fn refresh_from_postgres(
     app: tauri::AppHandle,
     state: State<'_, Mutex<ReviewState>>,
@@ -553,6 +615,100 @@ fn refresh_from_postgres(
 }
 
 #[command]
+fn refresh_from_data_api(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<ReviewState>>,
+    snapshot: DataApiSnapshot,
+) -> Result<(i64, i64, i64), String> {
+    let db_path = app_db_path(&app)?;
+    let mut conn = open_db(&db_path).map_err(|err| err.to_string())?;
+
+    let tx = conn.transaction().map_err(|err| {
+        let message = format!("refresh_from_data_api: begin transaction failed: {err}");
+        log_error(&message);
+        message
+    })?;
+    let query = "DELETE FROM reviews; DELETE FROM cards; DELETE FROM words;";
+    log_sql(query, &[]);
+    tx.execute_batch(query).map_err(|err| {
+        let message = format!("refresh_from_data_api: clear sqlite tables failed: {err}");
+        log_error(&message);
+        message
+    })?;
+
+    for row in &snapshot.words {
+        tx.execute(
+            "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                row.id,
+                row.text,
+                row.language,
+                row.translation,
+                row.chapter,
+                row.group_name,
+                row.sentence,
+                row.created_at,
+            ],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_data_api: insert word failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    }
+
+    for row in &snapshot.cards {
+        tx.execute(
+            "INSERT INTO cards (id, word_id, due_at, interval_days, ease, reps, lapses, seen_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+            params![
+                row.id,
+                row.word_id,
+                row.due_at,
+                row.interval_days,
+                row.ease,
+                row.reps,
+                row.lapses,
+            ],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_data_api: insert card failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    }
+
+    for row in &snapshot.reviews {
+        tx.execute(
+            "INSERT INTO reviews (id, card_id, grade, reviewed_at) VALUES (?1, ?2, ?3, ?4)",
+            params![row.id, row.card_id, row.grade, row.reviewed_at],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_data_api: insert review failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    }
+
+    tx.commit().map_err(|err| {
+        let message = format!("refresh_from_data_api: commit failed: {err}");
+        log_error(&message);
+        message
+    })?;
+
+    if let Ok(mut guard) = state.lock() {
+        guard.queue.clear();
+    }
+
+    Ok((
+        snapshot.words.len() as i64,
+        snapshot.cards.len() as i64,
+        snapshot.reviews.len() as i64,
+    ))
+}
+
+#[command]
 fn counts(app: tauri::AppHandle) -> Result<(i64, i64), String> {
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
@@ -572,6 +728,7 @@ fn counts(app: tauri::AppHandle) -> Result<(i64, i64), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(ReviewState {
             queue: Vec::new(),
             session_limit: 10,
@@ -582,9 +739,16 @@ pub fn run() {
             grade_card,
             report_issue,
             apply_correction,
+            apply_correction_local,
             refresh_from_postgres,
+            refresh_from_data_api,
             counts
         ])
-        .run(tauri::generate_context!())
+        .run(tauri::generate_context!(), |app, event| {
+            if let tauri::RunEvent::OpenUrl(urls) = event {
+                let payload: Vec<String> = urls.into_iter().map(|url| url.to_string()).collect();
+                let _ = app.emit("deep-link", payload);
+            }
+        })
         .expect("error while running tauri application");
 }

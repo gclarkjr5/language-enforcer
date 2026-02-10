@@ -5,7 +5,7 @@
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
-    "devUrl": "http://localtest.me:5173",
+    "devUrl": "http://192.168.178.88:5173",
     "frontendDist": "../frontend/dist"
   },
   "app": {
