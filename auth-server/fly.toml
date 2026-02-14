@@ -8,6 +8,10 @@ primary_region = 'ams'
 
 [build]
 
+[env]
+PORT = "8787"
+BIND_ADDR = "0.0.0.0:8787"
+
 [http_service]
 internal_port = 8787
 force_https = true

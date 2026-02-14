@@ -15,6 +15,9 @@ RUN cargo build --release --bin auth-server
 
 # We do not need the Rust toolchain to run the binary!
 FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends libssl3 ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/target/release/auth-server /usr/local/bin
 ENTRYPOINT ["/usr/local/bin/auth-server"]
