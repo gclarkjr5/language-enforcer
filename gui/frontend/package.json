@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@neondatabase/neon-js": "latest",
-    "@tauri-apps/api": "^2.9.1"
+    "@tauri-apps/api": "^2.9.1",
+    "@tauri-apps/plugin-shell": "^2.2.0"
   }
 }

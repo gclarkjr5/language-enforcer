@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::path::BaseDirectory;
 use tauri::{command, Manager, State};
+use tauri::Emitter;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
@@ -727,7 +728,7 @@ fn counts(app: tauri::AppHandle) -> Result<(i64, i64), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(ReviewState {
             queue: Vec::new(),
@@ -744,11 +745,14 @@ pub fn run() {
             refresh_from_data_api,
             counts
         ])
-        .run(tauri::generate_context!(), |app, event| {
-            if let tauri::RunEvent::OpenUrl(urls) = event {
-                let payload: Vec<String> = urls.into_iter().map(|url| url.to_string()).collect();
-                let _ = app.emit("deep-link", payload);
-            }
-        })
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app, event| {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let tauri::RunEvent::Opened { urls } = event {
+            let payload: Vec<String> = urls.into_iter().map(|url| url.to_string()).collect();
+            let _ = app.emit("deep-link", payload);
+        }
+    });
 }

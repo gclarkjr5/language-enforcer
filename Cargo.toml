@@ -1,3 +1,3 @@
 [workspace]
-members = ["core", "tui", "gui/src-tauri"]
+members = ["core", "tui", "gui/src-tauri", "auth-server"]
 resolver = "2"

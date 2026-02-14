@@ -1,29 +1,116 @@
 <script>
   import { onMount, onDestroy } from 'svelte'
   import { invoke } from '@tauri-apps/api/core'
+  import { listen } from '@tauri-apps/api/event'
   import {
-    startLogin,
-    clearAuth,
     getAuthState,
-    testDataApiRequest
+    refreshAuthState,
+    fetchDataApiSnapshot,
+    updateWord,
+    signInEmail,
+    signUpEmail,
   } from './lib/auth.js'
 
   let current = null
   let showAnswer = false
   let loading = false
+  let showLoadingCard = false
+  let syncing = false
   let error = ''
   let dueCount = 0
   let totalCount = 0
   let sessionActive = false
   let showSessionPrompt = false
   let reviewedThisSession = 0
-  let reportNote = ''
-  let showReport = false
   let showFix = false
   let fixText = ''
   let fixTranslation = ''
-  let authError = ''
-  let apiResult = ''
+  let fixAuthMessage = ''
+  let fixAuthTimer = null
+  let authState = getAuthState()
+  let toastMessage = ''
+  let toastTimer = null
+  let email = ''
+  let password = ''
+  let name = ''
+  let authMessage = ''
+  let authMessageTimer = null
+  let showAuthModal = false
+  let authMode = 'signin'
+  let unsubscribeDeepLink = null
+  $: showError = Boolean(error) && !isAuthRequiredError(error)
+  $: isBusy = loading || syncing
+
+  function showToast(message) {
+    toastMessage = message
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => {
+      toastMessage = ''
+      toastTimer = null
+    }, 2000)
+  }
+
+  function showAuthMessage(message) {
+    authMessage = message
+    if (authMessageTimer) clearTimeout(authMessageTimer)
+    authMessageTimer = setTimeout(() => {
+      authMessage = ''
+      authMessageTimer = null
+    }, 2000)
+  }
+
+  function isAuthRequiredError(err) {
+    if (!err) return false
+    const message = typeof err === 'string' ? err : err.message
+    if (!message) return false
+    return message.toLowerCase().includes('must be signed in')
+  }
+
+  function logAuth(message, data) {
+    if (data === undefined) {
+      console.info(`[auth] ${message}`)
+      return
+    }
+    console.info(`[auth] ${message}`, data)
+  }
+
+  function openAuthModal(mode) {
+    authMode = mode
+    authMessage = ''
+    if (authMessageTimer) {
+      clearTimeout(authMessageTimer)
+      authMessageTimer = null
+    }
+    showAuthModal = true
+  }
+
+  function closeAuthModal() {
+    showAuthModal = false
+  }
+
+  function handleBackdropKey(event, onClose) {
+    if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      onClose()
+    }
+  }
+
+  function handleDeepLink(url) {
+    try {
+      const parsed = new URL(url)
+      const verifier = parsed.searchParams.get('neon_auth_session_verifier')
+      if (!verifier) return
+      const current = new URL(window.location.href)
+      current.searchParams.set('neon_auth_session_verifier', verifier)
+      window.history.replaceState(window.history.state, '', current.href)
+      refreshAuthState().then(() => {
+        authState = getAuthState()
+        showToast('Signed in')
+      })
+    } catch (err) {
+      error = String(err)
+    }
+  }
 
   const grades = [
     { label: 'Again', value: 1 },
@@ -32,8 +119,13 @@
     { label: 'Easy', value: 5 }
   ]
 
+  const isTauri =
+    typeof window !== 'undefined' &&
+    (Boolean(window.__TAURI__) || Boolean(window.__TAURI_INTERNALS__))
+
   async function refreshCounts() {
     try {
+      if (!isTauri) return
       const [due, total] = await invoke('counts')
       dueCount = due
       totalCount = total
@@ -42,20 +134,32 @@
     }
   }
 
-  async function loadNext() {
-    loading = true
+  async function loadNext({ silent = false } = {}) {
+    if (!silent) {
+      loading = true
+      showLoadingCard = true
+    }
     error = ''
     try {
+      if (!isTauri) return
       const next = await invoke('next_due_card')
       current = next
       showAnswer = false
-      if (!next && sessionActive) {
+      if (!next && sessionActive && reviewedThisSession > 0) {
         showSessionPrompt = true
       }
     } catch (err) {
-      error = String(err)
+      if (isAuthRequiredError(err)) {
+        showToast('Must be signed in to use this feature')
+        error = ''
+      } else {
+        error = String(err)
+      }
     } finally {
-      loading = false
+      if (!silent) {
+        loading = false
+        showLoadingCard = false
+      }
     }
   }
 
@@ -65,12 +169,18 @@
     showSessionPrompt = false
     reviewedThisSession = 0
     try {
+      if (!isTauri) return
       await invoke('start_session')
       sessionActive = true
       await refreshCounts()
-      await loadNext()
+      await loadNext({ silent: true })
     } catch (err) {
-      error = String(err)
+      if (isAuthRequiredError(err)) {
+        showToast('Must be signed in to use this feature')
+        error = ''
+      } else {
+        error = String(err)
+      }
     } finally {
       loading = false
     }
@@ -81,10 +191,11 @@
     loading = true
     error = ''
     try {
+      if (!isTauri) return
       await invoke('grade_card', { input: { card_id: current.card_id, grade: value } })
       reviewedThisSession += 1
       await refreshCounts()
-      await loadNext()
+      await loadNext({ silent: true })
     } catch (err) {
       error = String(err)
     } finally {
@@ -101,38 +212,15 @@
     showAnswer = true
   }
 
-  function openReport() {
-    reportNote = ''
-    showReport = true
-  }
-
-  async function submitReport() {
-    if (!current) return
-    loading = true
-    error = ''
-    try {
-      await invoke('report_issue', {
-        input: {
-          card_id: current.card_id,
-          word_id: current.word_id,
-          text: current.text,
-          translation: current.translation ?? null,
-          note: reportNote.trim() ? reportNote.trim() : null,
-          reported_at: new Date().toISOString()
-        }
-      })
-      showReport = false
-    } catch (err) {
-      error = String(err)
-    } finally {
-      loading = false
-    }
-  }
-
   function openFix() {
     if (!current) return
     fixText = current.text ?? ''
     fixTranslation = current.translation ?? ''
+    fixAuthMessage = ''
+    if (fixAuthTimer) {
+      clearTimeout(fixAuthTimer)
+      fixAuthTimer = null
+    }
     showFix = true
   }
 
@@ -140,6 +228,19 @@
     if (!current) return
     loading = true
     error = ''
+    await refreshAuthState()
+    authState = getAuthState()
+    if (authState !== 'signed_in') {
+      fixAuthMessage = 'Must be signed in to use this feature'
+      if (fixAuthTimer) clearTimeout(fixAuthTimer)
+      fixAuthTimer = setTimeout(() => {
+        fixAuthMessage = ''
+        fixAuthTimer = null
+      }, 2000)
+      loading = false
+      return
+    }
+    fixAuthMessage = ''
     const nextText = fixText.trim()
     const nextTranslation = fixTranslation.trim()
     const textChanged = nextText !== current.text
@@ -150,13 +251,20 @@
       return
     }
     try {
-      await invoke('apply_correction', {
-        input: {
-          word_id: current.word_id,
-          text: textChanged ? nextText : null,
-          translation: translationChanged ? nextTranslation : null
-        }
+      await updateWord({
+        wordId: current.word_id,
+        text: textChanged ? nextText : null,
+        translation: translationChanged ? nextTranslation : null
       })
+      if (isTauri) {
+        await invoke('apply_correction_local', {
+          input: {
+            word_id: current.word_id,
+            text: textChanged ? nextText : null,
+            translation: translationChanged ? nextTranslation : null
+          }
+        })
+      }
       if (textChanged) current.text = nextText
       if (translationChanged) current.translation = nextTranslation
       showFix = false
@@ -168,11 +276,23 @@
   }
 
   async function syncFromPostgres() {
-    loading = true
+    syncing = true
     error = ''
     showSessionPrompt = false
     try {
-      await invoke('refresh_from_postgres')
+      if (!isTauri) {
+        throw new Error('Sync is only available in the desktop app.')
+      }
+      logAuth('refresh data: session', await refreshAuthState())
+      authState = getAuthState()
+      if (authState !== 'signed_in') {
+        showToast('Must be signed in to use this feature')
+        return
+      }
+      showToast('Refreshing data...')
+      const snapshot = await fetchDataApiSnapshot()
+      await invoke('refresh_from_data_api', { snapshot })
+      showToast('Data refreshed')
       reviewedThisSession = 0
       sessionActive = true
       await invoke('start_session')
@@ -181,7 +301,7 @@
     } catch (err) {
       error = String(err)
     } finally {
-      loading = false
+      syncing = false
     }
   }
 
@@ -200,29 +320,51 @@
     }
   }
 
-  async function beginAuth() {
-    authError = ''
+  async function beginSignIn() {
+    error = ''
     try {
-      await startLogin()
+      const session = await refreshAuthState()
+      authState = getAuthState()
+      if (session) {
+        showToast('Already signed in')
+        return
+      }
+      if (!email.trim() || !password.trim()) {
+        showAuthMessage('Email and password are required.')
+        return
+      }
+      authMessage = ''
+      logAuth('sign-in: starting', { email: email.trim() })
+      await signInEmail(email.trim(), password)
+      console.info('[auth] sign-in response', window.__leAuthLastSignIn ?? null)
+      authState = getAuthState()
+      logAuth('sign-in: session', await refreshAuthState())
+      showToast('Signed in')
+      closeAuthModal()
     } catch (err) {
-      authError = String(err)
+      logAuth('sign-in error', String(err))
+      showAuthMessage(String(err))
     }
   }
 
-  function signOut() {
-    clearAuth()
-    authError = ''
-    apiResult = ''
-  }
-
-  async function pingDataApi() {
-    authError = ''
-    apiResult = ''
+  async function beginSignUp() {
+    error = ''
     try {
-      const result = await testDataApiRequest()
-      apiResult = JSON.stringify(result, null, 2)
+      if (!email.trim() || !password.trim()) {
+        showAuthMessage('Email and password are required.')
+        return
+      }
+      authMessage = ''
+      logAuth('sign-up: starting', { email: email.trim() })
+      await signUpEmail(email.trim(), password, name.trim() || undefined)
+      console.info('[auth] sign-up response', window.__leAuthLastSignUp ?? null)
+      authState = getAuthState()
+      logAuth('sign-up: session', await refreshAuthState())
+      showToast('Signed up')
+      closeAuthModal()
     } catch (err) {
-      authError = String(err)
+      logAuth('sign-up error', String(err))
+      showAuthMessage('Error signing up')
     }
   }
 
@@ -230,58 +372,67 @@
     window.addEventListener('keydown', handleKey)
     await refreshCounts()
     await startSession()
+    try {
+      await refreshAuthState()
+      authState = getAuthState()
+      if (isTauri) {
+        unsubscribeDeepLink = await listen('deep-link', (event) => {
+          const payload = event.payload
+          if (Array.isArray(payload)) {
+            payload.forEach((url) => handleDeepLink(String(url)))
+          } else if (payload) {
+            handleDeepLink(String(payload))
+          }
+        })
+      }
+    } catch (err) {
+      error = String(err)
+    }
   })
 
   onDestroy(() => {
     window.removeEventListener('keydown', handleKey)
+    if (unsubscribeDeepLink) unsubscribeDeepLink()
   })
 </script>
 
 <main>
   <header>
-    <div>
-      <h1>Language Enforcer Review</h1>
+    <div class="header-left">
+      <button class="ghost" on:click={() => openAuthModal('signin')} disabled={isBusy}>Sign in</button>
+      <button class="ghost" on:click={() => openAuthModal('signup')} disabled={isBusy}>Sign up</button>
+    </div>
+    <div class="header-center">
+      {#if toastMessage}
+        <div class="toast">{toastMessage}</div>
+      {/if}
+      <h1>Language Enforcer</h1>
       <p class="meta">Due: {dueCount} / {totalCount}</p>
     </div>
     <div class="header-actions">
-      <button class="ghost" on:click={syncFromPostgres} disabled={loading}>Sync Postgres</button>
-      <button class="ghost" on:click={loadNext} disabled={loading}>Refresh</button>
+      <button class="ghost" on:click={syncFromPostgres} disabled={isBusy}>Refresh Data</button>
     </div>
   </header>
 
-  <section class="auth">
-    <div>
-      <h2>Neon Auth (OAuth + PKCE)</h2>
-      <p class="meta">
-        Replace the placeholder URLs in <code>auth.js</code>. The SDK handles tokens; this app does
-        not persist them explicitly.
-      </p>
-    </div>
-    <div class="auth-actions">
-      <button class="ghost" on:click={beginAuth}>Start sign-in</button>
-      <button class="ghost" on:click={signOut}>Clear state</button>
-      <button class="ghost" on:click={pingDataApi}>Test Data API</button>
-    </div>
-    {#if getAuthState() === 'signed_in'}
-      <div class="auth-step">
-        <span class="pill">Signed in</span>
-      </div>
-    {/if}
-    {#if authError}
-      <div class="error">{authError}</div>
-    {/if}
-    {#if apiResult}
-      <pre class="api-result">{apiResult}</pre>
-    {/if}
-  </section>
-
-  {#if error}
+  {#if showError}
     <div class="error">{error}</div>
   {/if}
 
   {#if showSessionPrompt}
-    <div class="modal-backdrop">
-      <div class="modal">
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Close session prompt"
+      on:click={() => { showSessionPrompt = false; sessionActive = false; }}
+      on:keydown={(event) => handleBackdropKey(event, () => { showSessionPrompt = false; sessionActive = false; })}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
         <h2>Session complete</h2>
         <p>You've finished 10 cards. Want another 10?</p>
         <div class="modal-actions">
@@ -292,24 +443,70 @@
     </div>
   {/if}
 
-  {#if showReport}
-    <div class="modal-backdrop">
-      <div class="modal">
-        <h2>Report issue</h2>
-        <p>What’s wrong with this card?</p>
-        <textarea bind:value={reportNote} rows="4" placeholder="Optional note"></textarea>
-        <div class="modal-actions">
-          <button class="grade" on:click={submitReport} disabled={loading}>Submit</button>
-          <button class="ghost" on:click={() => (showReport = false)} disabled={loading}>Cancel</button>
+  {#if showAuthModal}
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Close sign in dialog"
+      on:click={closeAuthModal}
+      on:keydown={(event) => handleBackdropKey(event, closeAuthModal)}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
+        <h2>{authMode === 'signup' ? 'Create account' : 'Sign in'}</h2>
+        {#if authMessage}
+          <div class="modal-note">{authMessage}</div>
+        {/if}
+        <label class="auth-field">
+          <span>Email</span>
+          <input type="email" bind:value={email} placeholder="you@example.com" />
+        </label>
+        <label class="auth-field">
+          <span>Password</span>
+          <input type="password" bind:value={password} placeholder="••••••••" />
+        </label>
+        {#if authMode === 'signup'}
+          <label class="auth-field">
+            <span>Name</span>
+            <input type="text" bind:value={name} placeholder="Your name" />
+          </label>
+        {/if}
+        <div class="auth-actions">
+          {#if authMode === 'signup'}
+            <button class="grade" on:click={beginSignUp} disabled={isBusy}>Sign up</button>
+          {:else}
+            <button class="grade" on:click={beginSignIn} disabled={isBusy}>Sign in</button>
+          {/if}
+          <button class="ghost" on:click={closeAuthModal} disabled={isBusy}>Cancel</button>
         </div>
       </div>
     </div>
   {/if}
 
   {#if showFix}
-    <div class="modal-backdrop">
-      <div class="modal">
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Close fix card dialog"
+      on:click={() => (showFix = false)}
+      on:keydown={(event) => handleBackdropKey(event, () => (showFix = false))}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
         <h2>Fix card</h2>
+        {#if fixAuthMessage}
+          <div class="modal-note">{fixAuthMessage}</div>
+        {/if}
         <label class="field">
           <span>Dutch</span>
           <input bind:value={fixText} placeholder="Dutch word" />
@@ -319,14 +516,14 @@
           <input bind:value={fixTranslation} placeholder="English translation" />
         </label>
         <div class="modal-actions">
-          <button class="grade" on:click={submitFix} disabled={loading}>Save</button>
-          <button class="ghost" on:click={() => (showFix = false)} disabled={loading}>Cancel</button>
+          <button class="grade" on:click={submitFix} disabled={isBusy}>Save</button>
+          <button class="ghost" on:click={() => (showFix = false)} disabled={isBusy}>Cancel</button>
         </div>
       </div>
     </div>
   {/if}
 
-  {#if loading}
+  {#if showLoadingCard}
     <div class="card">Loading…</div>
   {:else if !current}
     <div class="card empty">
@@ -342,7 +539,6 @@
       {:else}
         <button class="reveal" on:click={reveal}>Show answer</button>
       {/if}
-      <button class="report" on:click={openReport}>Report issue</button>
       <button class="report" on:click={openFix}>Fix text</button>
     </div>
 
@@ -350,7 +546,7 @@
       {#each grades as grade}
         <button
           class="grade"
-          disabled={!showAnswer || loading}
+          disabled={!showAnswer || isBusy}
           on:click={(event) => handleGradeTap(event, grade.value)}
           on:touchend={(event) => handleGradeTap(event, grade.value)}>
           <span>{grade.label}</span>
@@ -370,19 +566,57 @@
     background: #0f172a;
     color: #e2e8f0;
   }
+  :global(*), :global(*::before), :global(*::after) {
+    box-sizing: border-box;
+  }
   main {
+    width: 100%;
     max-width: 920px;
     margin: 0 auto;
-    padding: 32px 24px 48px;
+    padding: 32px 20px 48px;
   }
   header {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
     align-items: center;
-    justify-content: space-between;
+    gap: 12px;
     margin-bottom: 24px;
+  }
+  .header-left {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  .auth-field {
+    width: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .auth-field span {
+    color: #94a3b8;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .auth-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .toast {
+    font-size: 12px;
+    color: #93c5fd;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .header-center {
+    text-align: center;
   }
   .header-actions {
     display: flex;
+    justify-content: flex-end;
     gap: 12px;
   }
   h1 {
@@ -401,47 +635,6 @@
     border-radius: 8px;
     cursor: pointer;
   }
-  .auth {
-    background: #0b1220;
-    border: 1px solid #1f2a44;
-    border-radius: 16px;
-    padding: 18px 20px;
-    margin-bottom: 20px;
-    display: grid;
-    gap: 12px;
-  }
-  .auth h2 {
-    margin: 0 0 6px;
-    font-size: 18px;
-  }
-  .auth-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-  .auth-step {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .pill {
-    background: #1e293b;
-    color: #93c5fd;
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-  }
-  .api-result {
-    background: #0f172a;
-    border: 1px solid #1f2a44;
-    color: #e2e8f0;
-    border-radius: 12px;
-    padding: 12px;
-    margin: 0;
-    font-size: 12px;
-    overflow-x: auto;
-  }
   .card {
     background: #111827;
     border-radius: 16px;
@@ -451,19 +644,37 @@
   .card.empty {
     text-align: center;
   }
+  @media (max-width: 680px) {
+    main {
+      padding: 24px 16px 40px;
+    }
+    header {
+      grid-template-columns: 1fr;
+      text-align: center;
+    }
+    .header-left,
+    .header-actions {
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+  }
   .tagline {
     color: #94a3b8;
     font-size: 14px;
     margin-bottom: 16px;
   }
   .prompt {
-    font-size: 36px;
+    font-size: clamp(22px, 4.5vw, 36px);
     font-weight: 600;
     margin-bottom: 18px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .answer {
-    font-size: 28px;
+    font-size: clamp(18px, 3.6vw, 28px);
     color: #38bdf8;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .reveal {
     background: #2563eb;
@@ -487,16 +698,6 @@
     padding: 8px 12px;
     border-radius: 10px;
     cursor: pointer;
-  }
-  textarea {
-    width: 100%;
-    margin-top: 12px;
-    background: #0f172a;
-    color: #e2e8f0;
-    border: 1px solid #334155;
-    border-radius: 10px;
-    padding: 10px;
-    resize: vertical;
   }
   input {
     width: 100%;
@@ -570,5 +771,13 @@
     margin-top: 16px;
     display: flex;
     gap: 12px;
+  }
+  .modal-note {
+    margin: 8px 0 12px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #1e293b;
+    color: #cbd5f5;
+    font-size: 12px;
   }
 </style>

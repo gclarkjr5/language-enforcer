@@ -4,6 +4,8 @@ img/
 gui/src-tauri/gen
 gui/src-tauri/target
 gui/frontend/dist
+gui/frontend/certs/*.pem
+gui/frontend/certs/*.key
 # **/node_modules/
 # **/dist/
 # **/dist-ssr/

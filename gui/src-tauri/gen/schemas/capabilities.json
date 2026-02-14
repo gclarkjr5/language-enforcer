@@ -1,1 +1,1 @@
-{}
+{"app":{"identifier":"app","description":"Allow frontend event listening for deep link handling.","remote":{"urls":["https://timbered-greedily-alyvia.ngrok-free.dev"]},"local":true,"windows":["*"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:event:allow-emit","core:event:allow-emit-to"]}}

@@ -5,7 +5,7 @@
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
-    "devUrl": "http://192.168.178.88:5173",
+    "devUrl": "https://timbered-greedily-alyvia.ngrok-free.dev",
     "frontendDist": "../frontend/dist"
   },
   "app": {
@@ -17,7 +17,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "devCsp": "default-src 'self' data: blob: ipc: https: wss:; connect-src 'self' ipc: https: wss:; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:;"
     }
   },
   "bundle": {
