@@ -5,7 +5,6 @@
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
-    "devUrl": "https://timbered-greedily-alyvia.ngrok-free.dev",
     "frontendDist": "../frontend/dist"
   },
   "app": {

@@ -2,6 +2,7 @@ use axum::{
     body::{to_bytes, Body},
     extract::State,
     http::{HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::{from_fn, Next},
     response::{Response},
     routing::post,
     Json, Router,
@@ -11,14 +12,14 @@ use serde::{Deserialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 #[derive(Clone)]
 struct AppState {
     auth_url: String,
-    proxy_target: String,
-    proxy_client: reqwest::Client,
-    allowed_origin: Option<String>,
+    proxy_target: Option<String>,
+    proxy_client: Option<reqwest::Client>,
+    allowed_origin: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,58 +34,86 @@ async fn main() {
     dotenv().ok();
     let auth_url = std::env::var("NEON_AUTH_URL").expect("NEON_AUTH_URL not set");
     let bind_addr = std::env::var("BIND_ADDR").expect("BIND_ADDR not set");
-    let allowed_origin = std::env::var("ALLOWED_ORIGIN").expect("ALLOWED_ORIGIN not set");
-    let allowed_origin_log = allowed_origin.clone();
-    let proxy_target = std::env::var("PROXY_TARGET").expect("PROXY_TARGET not set");
-    let proxy_insecure = std::env::var("PROXY_INSECURE").expect("PROXY_INSECURE must be set true/false").parse().expect("Cannot parse to bool");
+    let allowed_origin = std::env::var("ALLOWED_ORIGIN").ok();
+    let allowed_origin_list: Vec<String> = allowed_origin
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    let proxy_target = std::env::var("PROXY_TARGET").ok();
+    let proxy_insecure = std::env::var("PROXY_INSECURE")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        .unwrap_or(false);
 
-    let cors = {
-        let origin = allowed_origin.parse::<HeaderValue>().expect("invalid ALLOWED_ORIGIN");
+    let cors = if allowed_origin_list.is_empty() {
         CorsLayer::new()
-            .allow_origin(origin)
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        let origins = allowed_origin_list
+            .iter()
+            .map(|origin| origin.parse::<HeaderValue>().expect("invalid ALLOWED_ORIGIN"))
+            .collect::<Vec<_>>();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
             .allow_methods(Any)
             .allow_headers(Any)
     };
-    // else {
-    //     CorsLayer::new()
-    //         .allow_origin(Any)
-    //         .allow_methods(Any)
-    //         .allow_headers(Any)
-    // };
 
-    let proxy_client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(proxy_insecure)
-        .build()
-        .expect("failed to build proxy client");
+    let proxy_client = proxy_target.as_ref().map(|_| {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(proxy_insecure)
+            .build()
+            .expect("failed to build proxy client")
+    });
 
     let state = Arc::new(AppState {
         auth_url,
         proxy_target: proxy_target.clone(),
         proxy_client,
-        allowed_origin: Some(allowed_origin),
+        allowed_origin: allowed_origin_list,
     });
 
     let app = Router::new()
         .route("/auth/sign-in", post(sign_in))
         .route("/auth/sign-up", post(sign_up))
         .fallback(proxy_request)
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(from_fn(log_request))
         .layer(cors);
 
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");
     println!(
-        "auth-server listening on http://{addr} (proxy_target={proxy_target}, insecure={proxy_insecure}, allowed_origin={})",
-        allowed_origin_log
+        "auth-server listening on http://{addr} (proxy_target={}, insecure={proxy_insecure}, allowed_origin={})",
+        proxy_target.clone().unwrap_or_else(|| "disabled".to_string()),
+        if state.allowed_origin.is_empty() {
+            "any".to_string()
+        } else {
+            state.allowed_origin.join(",")
+        }
     );
     axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
         .await
         .unwrap();
 }
 
+async fn log_request(req: Request<Body>, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let response = next.run(req).await;
+    println!("[request] {} {} -> {}", method, uri, response.status());
+    response
+}
+
 async fn sign_in(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<EmailAuthRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    println!("[auth] sign-in request");
     let client = reqwest::Client::builder()
         .cookie_store(true)
         .build()
@@ -95,7 +124,7 @@ async fn sign_in(
         "email": payload.email,
         "password": payload.password
     }));
-    if let Some(origin) = &state.allowed_origin {
+    if let Some(origin) = state.allowed_origin.first() {
         auth_req = auth_req.header("origin", origin);
     }
     let auth_resp = auth_req
@@ -136,6 +165,7 @@ async fn sign_up(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<EmailAuthRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    println!("[auth] sign-up request");
     let client = reqwest::Client::builder()
         .cookie_store(true)
         .build()
@@ -147,7 +177,7 @@ async fn sign_up(
         "password": payload.password,
         "name": payload.name
     }));
-    if let Some(origin) = &state.allowed_origin {
+    if let Some(origin) = state.allowed_origin.first() {
         auth_req = auth_req.header("origin", origin);
     }
     let auth_resp = auth_req
@@ -202,20 +232,26 @@ async fn proxy_request(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
 ) -> Result<Response, StatusCode> {
+    let Some(proxy_target) = state.proxy_target.as_ref() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let Some(proxy_client) = state.proxy_client.as_ref() else {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
     let (parts, body) = req.into_parts();
     let uri = parts.uri;
     let method = parts.method;
     let headers = parts.headers;
 
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let target = format!("{}{}", state.proxy_target.trim_end_matches('/'), path);
+    let target = format!("{}{}", proxy_target.trim_end_matches('/'), path);
     eprintln!("[proxy] {} {}", method, target);
 
     let body_bytes = to_bytes(body, usize::MAX)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let mut builder = state.proxy_client.request(method, target);
+    let mut builder = proxy_client.request(method, target);
     builder = builder.headers(filter_proxy_headers(&headers));
     let resp = builder
         .body(body_bytes)
