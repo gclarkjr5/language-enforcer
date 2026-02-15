@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use le_core::{schedule_sm2, Card};
+use le_core::{default_new_card, schedule_sm2, Card};
 use native_tls::TlsConnector;
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use rand::seq::SliceRandom;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::path::BaseDirectory;
@@ -47,6 +47,16 @@ struct CorrectionInput {
     word_id: String,
     text: Option<String>,
     translation: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddWordInput {
+    text: String,
+    translation: Option<String>,
+    word_id: String,
+    card_id: String,
+    created_at: String,
+    language: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -478,6 +488,57 @@ fn apply_correction_local(app: tauri::AppHandle, input: CorrectionInput) -> Resu
 }
 
 #[command]
+fn add_word_local(app: tauri::AppHandle, input: AddWordInput) -> Result<(), String> {
+    let db_path = app_db_path(&app)?;
+    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM words WHERE lower(text) = lower(?1) AND lower(translation) = lower(?2) LIMIT 1",
+            params![input.text, input.translation.clone().unwrap_or_default()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| err.to_string())?;
+    if exists.is_some() {
+        return Err("Word already exists".to_string());
+    }
+    conn.execute(
+        "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)",
+        params![
+            input.word_id,
+            input.text,
+            input.language,
+            input.translation,
+            input.created_at
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+
+    let card = default_new_card(
+        Uuid::parse_str(&input.word_id).map_err(|err| err.to_string())?,
+        DateTime::parse_from_rfc3339(&input.created_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|err| err.to_string())?,
+    );
+
+    conn.execute(
+        "INSERT INTO cards (id, word_id, due_at, interval_days, ease, reps, lapses, seen_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        params![
+            input.card_id,
+            card.word_id.to_string(),
+            card.due_at.to_rfc3339(),
+            card.interval_days,
+            card.ease,
+            card.reps,
+            card.lapses
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+#[command]
 fn refresh_from_postgres(
     app: tauri::AppHandle,
     state: State<'_, Mutex<ReviewState>>,
@@ -741,6 +802,7 @@ pub fn run() {
             report_issue,
             apply_correction,
             apply_correction_local,
+            add_word_local,
             refresh_from_postgres,
             refresh_from_data_api,
             counts

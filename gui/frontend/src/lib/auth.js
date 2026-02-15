@@ -219,6 +219,93 @@ export async function updateWord({ wordId, text, translation }) {
   }
 }
 
+export async function addWord({ text, translation, language = 'Dutch' }) {
+  await requireSession()
+  const wordId = crypto.randomUUID()
+  const cardId = crypto.randomUUID()
+  const createdAt = new Date().toISOString()
+  const normalizedText = text.trim()
+  const normalizedTranslation = translation?.trim() ?? ''
+  const checkUrl = new URL(`${DATA_API_URL}/words`)
+  checkUrl.searchParams.set(
+    'select',
+    'id'
+  )
+  checkUrl.searchParams.set('text', `ilike.${normalizedText}`)
+  checkUrl.searchParams.set('translation', `ilike.${normalizedTranslation}`)
+  checkUrl.searchParams.set('language', `eq.${language}`)
+  const checkResponse = await fetch(checkUrl, {
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${authToken ?? ''}`
+    }
+  })
+  if (!checkResponse.ok) {
+    throw new Error(`Data API error: ${checkResponse.status} ${await checkResponse.text()}`)
+  }
+  const existing = await checkResponse.json()
+  if (Array.isArray(existing) && existing.length > 0) {
+    throw new Error('Word already exists')
+  }
+  const word = {
+    id: wordId,
+    text: normalizedText,
+    language,
+    translation: normalizedTranslation || null,
+    chapter: null,
+    group_name: null,
+    sentence: null,
+    created_at: createdAt
+  }
+  const card = {
+    id: cardId,
+    word_id: wordId,
+    due_at: createdAt,
+    interval_days: 0,
+    ease: 2.5,
+    reps: 0,
+    lapses: 0
+  }
+  if (authToken) {
+    const wordResponse = await fetch(`${DATA_API_URL}/words`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${authToken}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation'
+      },
+      body: JSON.stringify(word)
+    })
+    if (!wordResponse.ok) {
+      throw new Error(`Data API error: ${wordResponse.status} ${await wordResponse.text()}`)
+    }
+    const cardResponse = await fetch(`${DATA_API_URL}/cards`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${authToken}`,
+        'content-type': 'application/json',
+        prefer: 'return=representation'
+      },
+      body: JSON.stringify(card)
+    })
+    if (!cardResponse.ok) {
+      throw new Error(`Data API error: ${cardResponse.status} ${await cardResponse.text()}`)
+    }
+  } else {
+    const wordResult = await client.from('words').insert([word]).select('id')
+    if (wordResult.error) {
+      throw new Error(wordResult.error.message)
+    }
+    const cardResult = await client.from('cards').insert([card]).select('id')
+    if (cardResult.error) {
+      throw new Error(cardResult.error.message)
+    }
+  }
+  return { wordId, cardId, createdAt, language }
+}
+
 export async function startLogin() {
   authState = 'redirecting'
   const callbackURL = isTauri && isIos ? IOS_REDIRECT_URI : REDIRECT_URI

@@ -7,6 +7,7 @@
     refreshAuthState,
     fetchDataApiSnapshot,
     updateWord,
+    addWord,
     signInEmail,
     signUpEmail,
   } from './lib/auth.js'
@@ -27,6 +28,11 @@
   let fixTranslation = ''
   let fixAuthMessage = ''
   let fixAuthTimer = null
+  let showAdd = false
+  let addText = ''
+  let addTranslation = ''
+  let addMessage = ''
+  let addTimer = null
   let authState = getAuthState()
   let toastMessage = ''
   let toastTimer = null
@@ -224,6 +230,21 @@
     showFix = true
   }
 
+  function openAdd() {
+    addText = ''
+    addTranslation = ''
+    addMessage = ''
+    if (addTimer) {
+      clearTimeout(addTimer)
+      addTimer = null
+    }
+    showAdd = true
+  }
+
+  function closeAdd() {
+    showAdd = false
+  }
+
   async function submitFix() {
     if (!current) return
     loading = true
@@ -270,6 +291,57 @@
       showFix = false
     } catch (err) {
       error = String(err)
+    } finally {
+      loading = false
+    }
+  }
+
+  function showAddMessage(message) {
+    addMessage = message
+    if (addTimer) clearTimeout(addTimer)
+    addTimer = setTimeout(() => {
+      addMessage = ''
+      addTimer = null
+    }, 2000)
+  }
+
+  async function submitAdd() {
+    loading = true
+    error = ''
+    await refreshAuthState()
+    authState = getAuthState()
+    if (authState !== 'signed_in') {
+      showAddMessage('Must be signed in to use this feature')
+      loading = false
+      return
+    }
+    const text = addText.trim()
+    const translation = addTranslation.trim()
+    if (!text || !translation) {
+      showAddMessage('Both fields are required')
+      loading = false
+      return
+    }
+    try {
+      const created = await addWord({ text, translation })
+      if (isTauri) {
+        await invoke('add_word_local', {
+          input: {
+            text,
+            translation,
+            word_id: created.wordId,
+            card_id: created.cardId,
+            created_at: created.createdAt,
+            language: created.language
+          }
+        })
+      }
+      showToast('Word added')
+      closeAdd()
+      await refreshCounts()
+    } catch (err) {
+      showAddMessage(String(err))
+      error = ''
     } finally {
       loading = false
     }
@@ -411,6 +483,7 @@
     </div>
     <div class="header-actions">
       <button class="ghost" on:click={syncFromPostgres} disabled={isBusy}>Refresh Data</button>
+      <button class="ghost" on:click={openAdd} disabled={isBusy}>Add Word</button>
     </div>
   </header>
 
@@ -523,6 +596,41 @@
     </div>
   {/if}
 
+  {#if showAdd}
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Close add data dialog"
+      on:click={closeAdd}
+      on:keydown={(event) => handleBackdropKey(event, closeAdd)}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
+        <h2>Add word</h2>
+        {#if addMessage}
+          <div class="modal-note">{addMessage}</div>
+        {/if}
+        <label class="field">
+          <span>Dutch</span>
+          <input bind:value={addText} placeholder="Dutch word" />
+        </label>
+        <label class="field">
+          <span>English</span>
+          <input bind:value={addTranslation} placeholder="English translation" />
+        </label>
+        <div class="modal-actions">
+          <button class="grade" on:click={submitAdd} disabled={isBusy}>Save</button>
+          <button class="ghost" on:click={closeAdd} disabled={isBusy}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if showLoadingCard}
     <div class="card">Loading…</div>
   {:else if !current}
@@ -616,8 +724,9 @@
   }
   .header-actions {
     display: flex;
-    justify-content: flex-end;
-    gap: 12px;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
   }
   h1 {
     margin: 0 0 6px;
