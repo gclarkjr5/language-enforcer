@@ -636,7 +636,7 @@
   {:else if !current}
     <div class="card empty">
       <h2>No cards due</h2>
-      <p>Add more words in the TUI or wait for cards to become due.</p>
+      <button class="grade" on:click={startSession} disabled={isBusy}>Start New Session</button>
     </div>
   {:else}
     <div class="card">
@@ -752,6 +752,10 @@
   }
   .card.empty {
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
   }
   @media (max-width: 680px) {
     main {
