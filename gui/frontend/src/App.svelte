@@ -14,6 +14,7 @@
 
   let current = null
   let showAnswer = false
+  let showReverse = false
   let loading = false
   let showLoadingCard = false
   let syncing = false
@@ -150,6 +151,11 @@
       if (!isTauri) return
       const next = await invoke('next_due_card')
       current = next
+      if (next?.translation) {
+        showReverse = Math.random() < 0.5
+      } else {
+        showReverse = false
+      }
       showAnswer = false
       if (!next && sessionActive && reviewedThisSession > 0) {
         showSessionPrompt = true
@@ -641,9 +647,9 @@
   {:else}
     <div class="card">
       <div class="tagline">{current.chapter ?? 'Unassigned'} • {current.group ?? 'Ungrouped'}</div>
-      <div class="prompt">{current.text}</div>
+      <div class="prompt">{showReverse ? current.translation ?? current.text : current.text}</div>
       {#if showAnswer}
-        <div class="answer">{current.translation ?? '—'}</div>
+        <div class="answer">{showReverse ? current.text : current.translation ?? '—'}</div>
       {:else}
         <button class="reveal" on:click={reveal}>Show answer</button>
       {/if}
