@@ -8,6 +8,8 @@
     fetchDataApiSnapshot,
     updateWord,
     addWord,
+    generateSentence,
+    gradeSentence,
     signInEmail,
     signUpEmail,
   } from './lib/auth.js'
@@ -15,6 +17,17 @@
   let current = null
   let showAnswer = false
   let showReverse = false
+  let specialIndex = null
+  let specialType = null
+  let specialActive = false
+  let specialSentence = ''
+  let specialTranslation = ''
+  let specialInput = ''
+  let specialFeedback = ''
+  let specialCorrection = ''
+  let specialScore = null
+  let specialLoading = false
+  let specialError = ''
   let loading = false
   let showLoadingCard = false
   let syncing = false
@@ -47,6 +60,7 @@
   let unsubscribeDeepLink = null
   $: showError = Boolean(error) && !isAuthRequiredError(error)
   $: isBusy = loading || syncing
+  $: canGrade = !specialActive || specialType !== 'create' || Boolean(specialFeedback)
 
   function showToast(message) {
     toastMessage = message
@@ -130,6 +144,25 @@
     typeof window !== 'undefined' &&
     (Boolean(window.__TAURI__) || Boolean(window.__TAURI_INTERNALS__))
 
+  function resetSpecial() {
+    specialActive = false
+    specialSentence = ''
+    specialTranslation = ''
+    specialInput = ''
+    specialFeedback = ''
+    specialCorrection = ''
+    specialScore = null
+    specialLoading = false
+    specialError = ''
+  }
+
+  function targetLanguageFor(source) {
+    const lowered = String(source || '').toLowerCase()
+    if (lowered === 'dutch') return 'English'
+    if (lowered === 'english') return 'Dutch'
+    return 'English'
+  }
+
   async function refreshCounts() {
     try {
       if (!isTauri) return
@@ -151,6 +184,7 @@
       if (!isTauri) return
       const next = await invoke('next_due_card')
       current = next
+      resetSpecial()
       if (next?.translation) {
         showReverse = Math.random() < 0.5
       } else {
@@ -159,6 +193,31 @@
       showAnswer = false
       if (!next && sessionActive && reviewedThisSession > 0) {
         showSessionPrompt = true
+      }
+      if (next && sessionActive && reviewedThisSession === specialIndex) {
+        specialActive = true
+        if (specialType === 'translate') {
+          if (!next?.translation) {
+            specialType = 'create'
+          } else {
+            showReverse = false
+            specialLoading = true
+            try {
+              const result = await generateSentence({
+                word: next.text,
+                translation: next.translation,
+                sourceLanguage: next.language,
+                targetLanguage: targetLanguageFor(next.language)
+              })
+              specialSentence = result?.sentence ?? ''
+              specialTranslation = result?.translation ?? ''
+            } catch (err) {
+              specialError = String(err)
+            } finally {
+              specialLoading = false
+            }
+          }
+        }
       }
     } catch (err) {
       if (isAuthRequiredError(err)) {
@@ -184,6 +243,8 @@
       if (!isTauri) return
       await invoke('start_session')
       sessionActive = true
+      specialIndex = Math.floor(Math.random() * 10)
+      specialType = Math.random() < 0.5 ? 'translate' : 'create'
       await refreshCounts()
       await loadNext({ silent: true })
     } catch (err) {
@@ -296,7 +357,12 @@
       if (translationChanged) current.translation = nextTranslation
       showFix = false
     } catch (err) {
-      error = String(err)
+      if (isAuthRequiredError(err)) {
+        showToast('Must be signed in to use this feature')
+        error = ''
+      } else {
+        error = String(err)
+      }
     } finally {
       loading = false
     }
@@ -353,6 +419,36 @@
     }
   }
 
+  async function submitSpecialSentence() {
+    if (!current) return
+    specialError = ''
+    specialLoading = true
+    const sentence = specialInput.trim()
+    if (!sentence) {
+      specialLoading = false
+      return
+    }
+    try {
+      const result = await gradeSentence({
+        word: current.text,
+        targetLanguage: current.language,
+        userSentence: sentence
+      })
+      specialScore = result?.score ?? null
+      specialFeedback = result?.feedback ?? ''
+      specialCorrection = result?.correction ?? ''
+    } catch (err) {
+      specialError = String(err)
+    } finally {
+      specialLoading = false
+    }
+  }
+
+  async function completeSpecial() {
+    if (!current) return
+    await grade(4)
+  }
+
   async function syncFromPostgres() {
     syncing = true
     error = ''
@@ -373,6 +469,8 @@
       showToast('Data refreshed')
       reviewedThisSession = 0
       sessionActive = true
+      specialIndex = Math.floor(Math.random() * 10)
+      specialType = Math.random() < 0.5 ? 'translate' : 'create'
       await invoke('start_session')
       await refreshCounts()
       await loadNext()
@@ -647,20 +745,68 @@
   {:else}
     <div class="card">
       <div class="tagline">{current.chapter ?? 'Unassigned'} • {current.group ?? 'Ungrouped'}</div>
-      <div class="prompt">{showReverse ? current.translation ?? current.text : current.text}</div>
-      {#if showAnswer}
-        <div class="answer">{showReverse ? current.text : current.translation ?? '—'}</div>
+      {#if specialActive}
+        {#if specialType === 'translate'}
+          <div class="prompt">{specialSentence || (specialLoading ? 'Generating…' : 'No sentence available')}</div>
+          {#if showAnswer}
+            <div class="answer">{specialTranslation || '—'}</div>
+          {:else}
+            <button class="reveal" on:click={reveal} disabled={specialLoading || !specialSentence}>
+              Show answer
+            </button>
+          {/if}
+          {#if specialError}
+            <div class="modal-note">{specialError}</div>
+          {/if}
+        {:else}
+          <div class="prompt">Create a sentence using "{current.text}".</div>
+          <textarea
+            class="field-input"
+            rows="3"
+            bind:value={specialInput}
+            placeholder="Write your sentence here"></textarea>
+          <div class="modal-actions">
+            {#if specialFeedback}
+              <button class="grade" on:click={completeSpecial} disabled={specialLoading}>
+                Continue
+              </button>
+            {:else}
+              <button
+                class="grade"
+                on:click={submitSpecialSentence}
+                disabled={specialLoading || !specialInput.trim()}>
+                Check
+              </button>
+            {/if}
+          </div>
+          {#if specialFeedback}
+            <div class="modal-note">
+              Score: {specialScore ?? '—'} • {specialFeedback}
+            </div>
+          {/if}
+          {#if specialCorrection}
+            <div class="modal-note">Correction: {specialCorrection}</div>
+          {/if}
+          {#if specialError}
+            <div class="modal-note">{specialError}</div>
+          {/if}
+        {/if}
       {:else}
-        <button class="reveal" on:click={reveal}>Show answer</button>
+        <div class="prompt">{showReverse ? current.translation ?? current.text : current.text}</div>
+        {#if showAnswer}
+          <div class="answer">{showReverse ? current.text : current.translation ?? '—'}</div>
+        {:else}
+          <button class="reveal" on:click={reveal}>Show answer</button>
+        {/if}
+        <button class="report" on:click={openFix}>Fix text</button>
       {/if}
-      <button class="report" on:click={openFix}>Fix text</button>
     </div>
 
     <div class="actions">
       {#each grades as grade}
         <button
           class="grade"
-          disabled={!showAnswer || isBusy}
+          disabled={!showAnswer || isBusy || !canGrade}
           on:click={(event) => handleGradeTap(event, grade.value)}
           on:touchend={(event) => handleGradeTap(event, grade.value)}>
           <span>{grade.label}</span>
@@ -826,6 +972,15 @@
     border-radius: 10px;
     padding: 10px;
   }
+  .field-input {
+    width: 100%;
+    background: #0f172a;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 10px;
+    resize: vertical;
+  }
   .field {
     display: flex;
     flex-direction: column;
@@ -890,6 +1045,7 @@
     margin-top: 16px;
     display: flex;
     gap: 12px;
+    justify-content: center;
   }
   .modal-note {
     margin: 8px 0 12px;

@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
 };
 use dotenvy::dotenv;
-use serde::{Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,6 +20,9 @@ struct AppState {
     proxy_target: Option<String>,
     proxy_client: Option<reqwest::Client>,
     allowed_origin: Vec<String>,
+    openai_key: Option<String>,
+    openai_model: String,
+    openai_client: reqwest::Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +30,34 @@ struct EmailAuthRequest {
     email: String,
     password: String,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateSentenceRequest {
+    word: String,
+    translation: Option<String>,
+    source_language: String,
+    target_language: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GradeSentenceRequest {
+    word: String,
+    target_language: String,
+    user_sentence: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIRequest {
+    model: String,
+    messages: Vec<OpenAIMessage>,
+    temperature: f32,
 }
 
 #[tokio::main]
@@ -47,6 +78,8 @@ async fn main() {
         .ok()
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
+    let openai_key = std::env::var("OPENAI_API_KEY").ok();
+    let openai_model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
 
     let cors = if allowed_origin_list.is_empty() {
         CorsLayer::new()
@@ -76,11 +109,16 @@ async fn main() {
         proxy_target: proxy_target.clone(),
         proxy_client,
         allowed_origin: allowed_origin_list,
+        openai_key,
+        openai_model,
+        openai_client: reqwest::Client::new(),
     });
 
     let app = Router::new()
         .route("/auth/sign-in", post(sign_in))
         .route("/auth/sign-up", post(sign_up))
+        .route("/ai/generate-sentence", post(generate_sentence))
+        .route("/ai/grade-sentence", post(grade_sentence))
         .fallback(proxy_request)
         .with_state(state.clone())
         .layer(from_fn(log_request))
@@ -222,6 +260,95 @@ async fn fetch_jwt(client: &reqwest::Client, auth_url: &str) -> Option<String> {
     }
     let data = resp.json::<Value>().await.ok()?;
     data.get("token").and_then(|v| v.as_str()).map(|v| v.to_string())
+}
+
+async fn generate_sentence(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<GenerateSentenceRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let Some(key) = state.openai_key.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let translation_hint = payload
+        .translation
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("none");
+    let system = "Return a compact JSON object with keys \"sentence\" and \"translation\". No markdown.";
+    let user = format!(
+        "Create a natural {source} sentence using the word \"{word}\". Provide its {target} translation. Translation hint: {hint}.",
+        source = payload.source_language,
+        target = payload.target_language,
+        word = payload.word,
+        hint = translation_hint
+    );
+    let content = call_openai(&state, key, system, &user).await?;
+    let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(data))
+}
+
+async fn grade_sentence(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<GradeSentenceRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let Some(key) = state.openai_key.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let system = "Return a compact JSON object with keys \"score\" (1-10), \"feedback\" (very short), and \"correction\" (a corrected sentence). No markdown.";
+    let user = format!(
+        "Evaluate the user's {language} sentence for correct use of the word \"{word}\". Sentence: \"{sentence}\". Provide score 1-10, a short rubric, and a corrected sentence if needed.",
+        language = payload.target_language,
+        word = payload.word,
+        sentence = payload.user_sentence
+    );
+    let content = call_openai(&state, key, system, &user).await?;
+    let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(data))
+}
+
+async fn call_openai(
+    state: &AppState,
+    key: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, StatusCode> {
+    let req = OpenAIRequest {
+        model: state.openai_model.clone(),
+        messages: vec![
+            OpenAIMessage {
+                role: "system".to_string(),
+                content: system.to_string(),
+            },
+            OpenAIMessage {
+                role: "user".to_string(),
+                content: user.to_string(),
+            },
+        ],
+        temperature: 0.7,
+    };
+    let resp = state
+        .openai_client
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(key)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        eprintln!("[openai] error status={status} body={body}");
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    let data: Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let content = data
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|value| value.as_str())
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    Ok(content.trim().to_string())
 }
 
 fn join_url(base: &str, path: &str) -> String {

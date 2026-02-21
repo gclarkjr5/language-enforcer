@@ -306,6 +306,43 @@ export async function addWord({ text, translation, language = 'Dutch' }) {
   return { wordId, cardId, createdAt, language }
 }
 
+export async function generateSentence({ word, translation, sourceLanguage, targetLanguage }) {
+  const response = await fetch(`${AUTH_SERVER_URL}/ai/generate-sentence`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      word,
+      translation,
+      source_language: sourceLanguage,
+      target_language: targetLanguage
+    })
+  })
+  if (!response.ok) {
+    throw new Error(`AI error: ${response.status} ${await response.text()}`)
+  }
+  return response.json()
+}
+
+export async function gradeSentence({ word, targetLanguage, userSentence }) {
+  const response = await fetch(`${AUTH_SERVER_URL}/ai/grade-sentence`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      word,
+      target_language: targetLanguage,
+      user_sentence: userSentence
+    })
+  })
+  if (!response.ok) {
+    throw new Error(`AI error: ${response.status} ${await response.text()}`)
+  }
+  return response.json()
+}
+
 export async function startLogin() {
   authState = 'redirecting'
   const callbackURL = isTauri && isIos ? IOS_REDIRECT_URI : REDIRECT_URI
