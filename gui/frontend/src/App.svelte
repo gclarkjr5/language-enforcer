@@ -808,7 +808,7 @@
           class="grade"
           disabled={!showAnswer || isBusy || !canGrade}
           on:click={(event) => handleGradeTap(event, grade.value)}
-          on:touchend={(event) => handleGradeTap(event, grade.value)}>
+          >
           <span>{grade.label}</span>
           <small>{grade.value === 5 ? '4' : grade.value === 4 ? '3' : grade.value === 3 ? '2' : '1'}</small>
         </button>
