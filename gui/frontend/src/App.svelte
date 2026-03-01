@@ -9,7 +9,9 @@
     updateWord,
     addWord,
     generateSentence,
+    generateQuestion,
     gradeSentence,
+    deleteWord,
     signInEmail,
     signUpEmail,
   } from './lib/auth.js'
@@ -22,6 +24,7 @@
   let specialActive = false
   let specialSentence = ''
   let specialTranslation = ''
+  let specialQuestion = ''
   let specialInput = ''
   let specialFeedback = ''
   let specialCorrection = ''
@@ -47,6 +50,9 @@
   let addTranslation = ''
   let addMessage = ''
   let addTimer = null
+  let showDeleteConfirm = false
+  let deleteError = ''
+  let deleteLoading = false
   let authState = getAuthState()
   let toastMessage = ''
   let toastTimer = null
@@ -148,6 +154,7 @@
     specialActive = false
     specialSentence = ''
     specialTranslation = ''
+    specialQuestion = ''
     specialInput = ''
     specialFeedback = ''
     specialCorrection = ''
@@ -161,6 +168,11 @@
     if (lowered === 'dutch') return 'English'
     if (lowered === 'english') return 'Dutch'
     return 'English'
+  }
+
+  function pickSpecialType() {
+    const options = ['translate', 'create', 'question']
+    return options[Math.floor(Math.random() * options.length)]
   }
 
   async function refreshCounts() {
@@ -217,6 +229,26 @@
               specialLoading = false
             }
           }
+        } else if (specialType === 'question') {
+          showReverse = false
+          specialQuestion = ''
+          specialLoading = true
+          try {
+            const result = await generateQuestion({
+              word: next.text,
+              translation: next.translation,
+              sourceLanguage: next.language,
+              targetLanguage: targetLanguageFor(next.language)
+            })
+            specialQuestion = result?.question ?? ''
+            if (!specialQuestion) {
+              specialError = 'No question available'
+            }
+          } catch (err) {
+            specialError = String(err)
+          } finally {
+            specialLoading = false
+          }
         }
       }
     } catch (err) {
@@ -244,7 +276,7 @@
       await invoke('start_session')
       sessionActive = true
       specialIndex = Math.floor(Math.random() * 10)
-      specialType = Math.random() < 0.5 ? 'translate' : 'create'
+      specialType = pickSpecialType()
       await refreshCounts()
       await loadNext({ silent: true })
     } catch (err) {
@@ -294,6 +326,8 @@
       clearTimeout(fixAuthTimer)
       fixAuthTimer = null
     }
+    showDeleteConfirm = false
+    deleteError = ''
     showFix = true
   }
 
@@ -310,6 +344,16 @@
 
   function closeAdd() {
     showAdd = false
+  }
+
+  function openDeleteConfirm() {
+    deleteError = ''
+    showDeleteConfirm = true
+  }
+
+  function closeDeleteConfirm() {
+    showDeleteConfirm = false
+    deleteError = ''
   }
 
   async function submitFix() {
@@ -365,6 +409,38 @@
       }
     } finally {
       loading = false
+    }
+  }
+
+  async function confirmDelete() {
+    if (!current) return
+    deleteError = ''
+    deleteLoading = true
+    try {
+      await refreshAuthState()
+      authState = getAuthState()
+      await deleteWord({ wordId: current.word_id, cardId: current.card_id })
+      if (isTauri) {
+        await invoke('delete_word_local', {
+          input: {
+            word_id: current.word_id,
+            card_id: current.card_id
+          }
+        })
+      }
+      showToast('Word deleted')
+      showFix = false
+      closeDeleteConfirm()
+      await refreshCounts()
+      await loadNext({ silent: true })
+    } catch (err) {
+      if (isAuthRequiredError(err)) {
+        deleteError = 'Must be signed in to use this feature'
+      } else {
+        deleteError = String(err)
+      }
+    } finally {
+      deleteLoading = false
     }
   }
 
@@ -444,7 +520,8 @@
       const result = await gradeSentence({
         word: current.text,
         targetLanguage: current.language,
-        userSentence: sentence
+        userSentence: sentence,
+        question: specialType === 'question' ? specialQuestion : undefined
       })
       specialScore = result?.score ?? null
       specialFeedback = result?.feedback ?? ''
@@ -482,7 +559,7 @@
       reviewedThisSession = 0
       sessionActive = true
       specialIndex = Math.floor(Math.random() * 10)
-      specialType = Math.random() < 0.5 ? 'translate' : 'create'
+      specialType = pickSpecialType()
       await invoke('start_session')
       await refreshCounts()
       await loadNext()
@@ -607,6 +684,39 @@
     <div class="error">{error}</div>
   {/if}
 
+  {#if showDeleteConfirm}
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Confirm delete dialog"
+      on:click={closeDeleteConfirm}
+      on:keydown={(event) => handleBackdropKey(event, closeDeleteConfirm)}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
+        <h2>Delete word</h2>
+        <p>Are you sure you want to delete "{current?.text ?? 'this word'}"?</p>
+        {#if deleteError}
+          <div class="modal-note">{deleteError}</div>
+        {/if}
+        <div class="modal-actions">
+          <button
+            class="delete-word"
+            on:click={confirmDelete}
+            disabled={deleteLoading}>
+            {deleteLoading ? 'Deleting…' : 'Delete'}
+          </button>
+          <button class="ghost" on:click={closeDeleteConfirm} disabled={deleteLoading}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if showSessionPrompt}
     <div
       class="modal-backdrop"
@@ -692,7 +802,7 @@
         tabindex="0"
         on:click|stopPropagation
         on:keydown|stopPropagation>
-        <h2>Fix card</h2>
+        <h2>Fix/Delete Text</h2>
         {#if fixAuthMessage}
           <div class="modal-note">{fixAuthMessage}</div>
         {/if}
@@ -707,6 +817,13 @@
         <div class="modal-actions">
           <button class="grade" on:click={submitFix} disabled={isBusy}>Save</button>
           <button class="ghost" on:click={() => (showFix = false)} disabled={isBusy}>Cancel</button>
+          <button
+            class="delete-word"
+            type="button"
+            on:click={openDeleteConfirm}
+            disabled={isBusy}>
+            Delete Word
+          </button>
         </div>
       </div>
     </div>
@@ -770,6 +887,40 @@
           {#if specialError}
             <div class="modal-note">{specialError}</div>
           {/if}
+        {:else if specialType === 'question'}
+          <div class="prompt">
+            {specialQuestion || (specialLoading ? 'Generating question…' : 'No question available')}
+          </div>
+          <textarea
+            class="field-input"
+            rows="3"
+            bind:value={specialInput}
+            placeholder={`Answer the question in ${targetLanguageFor(current.language)}`}></textarea>
+          <div class="modal-actions">
+            {#if specialFeedback}
+              <button class="grade" on:click={completeSpecial} disabled={specialLoading}>
+                Continue
+              </button>
+            {:else}
+              <button
+                class="grade"
+                on:click={submitSpecialSentence}
+                disabled={specialLoading || !specialQuestion || !specialInput.trim()}>
+                Check
+              </button>
+            {/if}
+          </div>
+          {#if specialFeedback}
+            <div class="modal-note">
+              Score: {specialScore ?? '—'} • {specialFeedback}
+            </div>
+          {/if}
+          {#if specialCorrection}
+            <div class="modal-note">Correction: {specialCorrection}</div>
+          {/if}
+          {#if specialError}
+            <div class="modal-note">{specialError}</div>
+          {/if}
         {:else}
           <div class="prompt">Create a sentence using "{current.text}".</div>
           <textarea
@@ -810,7 +961,7 @@
         {:else}
           <button class="reveal" on:click={reveal}>Show answer</button>
         {/if}
-        <button class="report" on:click={openFix}>Fix text</button>
+        <button class="report" on:click={openFix}>Fix/Delete Text</button>
       {/if}
     </div>
 
@@ -907,6 +1058,15 @@
     padding: 8px 14px;
     border-radius: 8px;
     cursor: pointer;
+  }
+  .delete-word {
+    border: none;
+    background: #dc2626;
+    color: white;
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
   }
   .card {
     background: #111827;

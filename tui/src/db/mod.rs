@@ -25,7 +25,11 @@ pub fn log_error(message: &str) {
     line.push_str("[error] ");
     line.push_str(message);
     line.push('\n');
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     }
@@ -85,8 +89,9 @@ pub fn get_db_backend(path: &Path) -> DbResult<Box<dyn Db>> {
     match backend.as_str() {
         "sqlite" => Ok(Box::new(sqlite::SqliteDb::open(path)?)),
         "postgres" => {
-            let url = std::env::var("DATABASE_URL")
-                .map_err(|_| DbError::Config("DATABASE_URL is required for postgres".to_string()))?;
+            let url = std::env::var("DATABASE_URL").map_err(|_| {
+                DbError::Config("DATABASE_URL is required for postgres".to_string())
+            })?;
             let connector = TlsConnector::new()
                 .map_err(|err| DbError::Config(format!("Failed to create TLS connector: {err}")))?;
             let connector = MakeTlsConnector::new(connector);

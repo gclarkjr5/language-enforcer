@@ -219,6 +219,30 @@ export async function updateWord({ wordId, text, translation }) {
   }
 }
 
+async function deleteRows(url) {
+  const response = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${authToken}`,
+      'content-type': 'application/json'
+    }
+  })
+  if (!response.ok) {
+    throw new Error(`Data API error: ${response.status} ${await response.text()}`)
+  }
+}
+
+export async function deleteWord({ wordId, cardId }) {
+  await requireSession()
+  if (!authToken) {
+    throw new Error('You must be signed in to use the Data API.')
+  }
+  await deleteRows(`${DATA_API_URL}/reviews?card_id=eq.${cardId}`)
+  await deleteRows(`${DATA_API_URL}/cards?id=eq.${cardId}`)
+  await deleteRows(`${DATA_API_URL}/words?id=eq.${wordId}`)
+}
+
 async function checkWordDuplicate(text, language = 'Dutch') {
   const normalized = text.trim()
   const url = new URL(`${DATA_API_URL}/words`)
@@ -338,7 +362,26 @@ export async function generateSentence({ word, translation, sourceLanguage, targ
   return response.json()
 }
 
-export async function gradeSentence({ word, targetLanguage, userSentence }) {
+export async function generateQuestion({ word, translation, sourceLanguage, targetLanguage }) {
+  const response = await fetch(`${AUTH_SERVER_URL}/ai/generate-question`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      word,
+      translation,
+      source_language: sourceLanguage,
+      target_language: targetLanguage
+    })
+  })
+  if (!response.ok) {
+    throw new Error(`AI error: ${response.status} ${await response.text()}`)
+  }
+  return response.json()
+}
+
+export async function gradeSentence({ word, targetLanguage, userSentence, question }) {
   const response = await fetch(`${AUTH_SERVER_URL}/ai/grade-sentence`, {
     method: 'POST',
     headers: {
@@ -347,7 +390,8 @@ export async function gradeSentence({ word, targetLanguage, userSentence }) {
     body: JSON.stringify({
       word,
       target_language: targetLanguage,
-      user_sentence: userSentence
+      user_sentence: userSentence,
+      question
     })
   })
   if (!response.ok) {

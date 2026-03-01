@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use le_core::{default_new_card, Language, Word};
+use le_core::{Language, Word, default_new_card};
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use uuid::Uuid;
@@ -31,7 +31,11 @@ fn log_sql(query: &str, params: &[(&str, String)]) {
         line.push_str(value);
     }
     line.push('\n');
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     }

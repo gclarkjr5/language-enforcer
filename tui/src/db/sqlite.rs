@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use le_core::{default_new_card, Language, Word};
-use rusqlite::{params, Connection};
+use le_core::{Language, Word, default_new_card};
+use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 use crate::db::{Db, DbResult};
@@ -131,9 +131,9 @@ impl Db for SqliteDb {
     }
 
     fn word_exists(&self, text: &str, language: Language) -> DbResult<bool> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT 1 FROM words WHERE lower(text) = lower(?1) AND language = ?2 LIMIT 1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT 1 FROM words WHERE lower(text) = lower(?1) AND language = ?2 LIMIT 1",
+        )?;
         let mut rows = stmt.query(params![text, format!("{:?}", language)])?;
         Ok(rows.next()?.is_some())
     }
@@ -211,8 +211,14 @@ impl Db for SqliteDb {
             "DELETE FROM reviews WHERE card_id IN (SELECT id FROM cards WHERE word_id = ?1)",
             params![id],
         )?;
-        self.conn.execute("DELETE FROM cards WHERE word_id = ?1", params![word_id.to_string()])?;
-        self.conn.execute("DELETE FROM words WHERE id = ?1", params![word_id.to_string()])?;
+        self.conn.execute(
+            "DELETE FROM cards WHERE word_id = ?1",
+            params![word_id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM words WHERE id = ?1",
+            params![word_id.to_string()],
+        )?;
         Ok(())
     }
 

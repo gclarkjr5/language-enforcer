@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use le_core::{default_new_card, schedule_sm2, Card};
+use le_core::{Card, default_new_card, schedule_sm2};
 use native_tls::TlsConnector;
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use rand::seq::SliceRandom;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::path::BaseDirectory;
-use tauri::{command, Manager, State};
 use tauri::Emitter;
+use tauri::path::BaseDirectory;
+use tauri::{Manager, State, command};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
@@ -61,6 +61,12 @@ struct AddWordInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct DeleteWordInput {
+    word_id: String,
+    card_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct WordRow {
     id: String,
     text: String,
@@ -107,7 +113,9 @@ struct ReviewState {
 fn find_seed_db(app: &tauri::AppHandle) -> Option<PathBuf> {
     let candidates = [
         app.path().resolve("words.db", BaseDirectory::Resource).ok(),
-        app.path().resolve("data/words.db", BaseDirectory::Resource).ok(),
+        app.path()
+            .resolve("data/words.db", BaseDirectory::Resource)
+            .ok(),
     ];
     for candidate in candidates.into_iter().flatten() {
         if candidate.exists() {
@@ -137,8 +145,9 @@ fn app_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let db_path = dir.join("words.db");
 
-
-    if !db_path.exists() && let Some(seed) = find_seed_db(app) {
+    if !db_path.exists()
+        && let Some(seed) = find_seed_db(app)
+    {
         std::fs::copy(&seed, &db_path).map_err(|err| err.to_string())?;
     }
     Ok(db_path)
@@ -181,7 +190,8 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
 }
 
 fn postgres_url() -> Result<String, String> {
-    std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL is required for Postgres sync".to_string())
+    std::env::var("DATABASE_URL")
+        .map_err(|_| "DATABASE_URL is required for Postgres sync".to_string())
 }
 
 fn open_postgres() -> Result<Client, String> {
@@ -209,7 +219,11 @@ fn log_sql(query: &str, params: &[(&str, String)]) {
         line.push_str(value);
     }
     line.push('\n');
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     }
@@ -223,7 +237,11 @@ fn log_error(message: &str) {
     line.push_str("[error] ");
     line.push_str(message);
     line.push('\n');
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = file.write_all(line.as_bytes());
     }
@@ -237,12 +255,18 @@ fn ensure_seen_count(conn: &Connection) -> rusqlite::Result<()> {
             return Ok(());
         }
     }
-    conn.execute("ALTER TABLE cards ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0", [])?;
+    conn.execute(
+        "ALTER TABLE cards ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
     Ok(())
 }
 
 #[command]
-fn start_session(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) -> Result<(), String> {
+fn start_session(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<ReviewState>>,
+) -> Result<(), String> {
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
     let now = Utc::now().to_rfc3339();
@@ -262,17 +286,24 @@ fn start_session(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) ->
     }
     let mut rng = rand::thread_rng();
     ids.shuffle(&mut rng);
-    let mut guard = state.lock().map_err(|_| "Failed to lock review state".to_string())?;
+    let mut guard = state
+        .lock()
+        .map_err(|_| "Failed to lock review state".to_string())?;
     let limit = guard.session_limit;
     guard.queue = ids.into_iter().take(limit).collect();
     Ok(())
 }
 
 #[command]
-fn next_due_card(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) -> Result<Option<ReviewItem>, String> {
+fn next_due_card(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<ReviewState>>,
+) -> Result<Option<ReviewItem>, String> {
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
-    let mut guard = state.lock().map_err(|_| "Failed to lock review state".to_string())?;
+    let mut guard = state
+        .lock()
+        .map_err(|_| "Failed to lock review state".to_string())?;
     let Some(card_id) = guard.queue.pop() else {
         return Ok(None);
     };
@@ -297,10 +328,16 @@ fn next_due_card(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) ->
             word_id: row.get::<_, String>(1).map_err(|err| err.to_string())?,
             due_at: row.get::<_, String>(2).map_err(|err| err.to_string())?,
             text: row.get::<_, String>(3).map_err(|err| err.to_string())?,
-            translation: row.get::<_, Option<String>>(4).map_err(|err| err.to_string())?,
+            translation: row
+                .get::<_, Option<String>>(4)
+                .map_err(|err| err.to_string())?,
             language: row.get::<_, String>(5).map_err(|err| err.to_string())?,
-            chapter: row.get::<_, Option<String>>(6).map_err(|err| err.to_string())?,
-            group: row.get::<_, Option<String>>(7).map_err(|err| err.to_string())?,
+            chapter: row
+                .get::<_, Option<String>>(6)
+                .map_err(|err| err.to_string())?,
+            group: row
+                .get::<_, Option<String>>(7)
+                .map_err(|err| err.to_string())?,
         };
         Ok(Some(item))
     } else {
@@ -309,7 +346,11 @@ fn next_due_card(app: tauri::AppHandle, state: State<'_, Mutex<ReviewState>>) ->
 }
 
 #[command]
-fn grade_card(app: tauri::AppHandle, input: GradeInput, state: State<'_, Mutex<ReviewState>>) -> Result<(), String> {
+fn grade_card(
+    app: tauri::AppHandle,
+    input: GradeInput,
+    state: State<'_, Mutex<ReviewState>>,
+) -> Result<(), String> {
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
     let now = Utc::now();
@@ -324,16 +365,20 @@ fn grade_card(app: tauri::AppHandle, input: GradeInput, state: State<'_, Mutex<R
         .query(params![input.card_id])
         .map_err(|err| err.to_string())?;
     let row = rows.next().map_err(|err| err.to_string())?;
-    let Some(row) = row else { return Ok(()); };
+    let Some(row) = row else {
+        return Ok(());
+    };
 
     let mut card = Card {
         id: Uuid::parse_str(&row.get::<_, String>(0).map_err(|err| err.to_string())?)
             .map_err(|err| err.to_string())?,
         word_id: Uuid::parse_str(&row.get::<_, String>(1).map_err(|err| err.to_string())?)
             .map_err(|err| err.to_string())?,
-        due_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(2).map_err(|err| err.to_string())?)
-            .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|err| err.to_string())?,
+        due_at: DateTime::parse_from_rfc3339(
+            &row.get::<_, String>(2).map_err(|err| err.to_string())?,
+        )
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|err| err.to_string())?,
         interval_days: row.get(3).map_err(|err| err.to_string())?,
         ease: row.get(4).map_err(|err| err.to_string())?,
         reps: row.get(5).map_err(|err| err.to_string())?,
@@ -422,7 +467,10 @@ fn apply_correction(app: tauri::AppHandle, input: CorrectionInput) -> Result<(),
                 "UPDATE words SET text = $1 WHERE id = $2",
                 &[("text", text.to_string()), ("id", input.word_id.clone())],
             );
-            client.execute("UPDATE words SET text = $1 WHERE id = $2", &[text, &input.word_id])
+            client.execute(
+                "UPDATE words SET text = $1 WHERE id = $2",
+                &[text, &input.word_id],
+            )
         }
         (None, Some(translation)) => {
             log_sql(
@@ -539,6 +587,24 @@ fn add_word_local(app: tauri::AppHandle, input: AddWordInput) -> Result<(), Stri
         ],
     )
     .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[command]
+fn delete_word_local(app: tauri::AppHandle, input: DeleteWordInput) -> Result<(), String> {
+    let db_path = app_db_path(&app)?;
+    let mut conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    tx.execute(
+        "DELETE FROM reviews WHERE card_id = ?1",
+        params![input.card_id],
+    )
+    .map_err(|err| err.to_string())?;
+    tx.execute("DELETE FROM cards WHERE id = ?1", params![input.card_id])
+        .map_err(|err| err.to_string())?;
+    tx.execute("DELETE FROM words WHERE id = ?1", params![input.word_id])
+        .map_err(|err| err.to_string())?;
+    tx.commit().map_err(|err| err.to_string())?;
     Ok(())
 }
 #[command]
@@ -806,6 +872,7 @@ pub fn run() {
             apply_correction,
             apply_correction_local,
             add_word_local,
+            delete_word_local,
             refresh_from_postgres,
             refresh_from_data_api,
             counts

@@ -1,15 +1,15 @@
 use axum::{
-    body::{to_bytes, Body},
+    Json, Router,
+    body::{Body, to_bytes},
     extract::State,
     http::{HeaderMap, HeaderValue, Request, StatusCode},
-    middleware::{from_fn, Next},
-    response::{Response},
+    middleware::{Next, from_fn},
+    response::Response,
     routing::post,
-    Json, Router,
 };
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -41,10 +41,19 @@ struct GenerateSentenceRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct GenerateQuestionRequest {
+    word: String,
+    translation: Option<String>,
+    source_language: String,
+    target_language: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct GradeSentenceRequest {
     word: String,
     target_language: String,
     user_sentence: String,
+    question: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,7 +98,11 @@ async fn main() {
     } else {
         let origins = allowed_origin_list
             .iter()
-            .map(|origin| origin.parse::<HeaderValue>().expect("invalid ALLOWED_ORIGIN"))
+            .map(|origin| {
+                origin
+                    .parse::<HeaderValue>()
+                    .expect("invalid ALLOWED_ORIGIN")
+            })
             .collect::<Vec<_>>();
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
@@ -118,6 +131,7 @@ async fn main() {
         .route("/auth/sign-in", post(sign_in))
         .route("/auth/sign-up", post(sign_up))
         .route("/ai/generate-sentence", post(generate_sentence))
+        .route("/ai/generate-question", post(generate_question))
         .route("/ai/grade-sentence", post(grade_sentence))
         .fallback(proxy_request)
         .with_state(state.clone())
@@ -127,7 +141,9 @@ async fn main() {
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");
     println!(
         "auth-server listening on http://{addr} (proxy_target={}, insecure={proxy_insecure}, allowed_origin={})",
-        proxy_target.clone().unwrap_or_else(|| "disabled".to_string()),
+        proxy_target
+            .clone()
+            .unwrap_or_else(|| "disabled".to_string()),
         if state.allowed_origin.is_empty() {
             "any".to_string()
         } else {
@@ -165,10 +181,7 @@ async fn sign_in(
     if let Some(origin) = state.allowed_origin.first() {
         auth_req = auth_req.header("origin", origin);
     }
-    let auth_resp = auth_req
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let auth_resp = auth_req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let status = auth_resp.status();
     let raw = auth_resp
@@ -218,10 +231,7 @@ async fn sign_up(
     if let Some(origin) = state.allowed_origin.first() {
         auth_req = auth_req.header("origin", origin);
     }
-    let auth_resp = auth_req
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let auth_resp = auth_req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let status = auth_resp.status();
     let raw = auth_resp
@@ -259,7 +269,9 @@ async fn fetch_jwt(client: &reqwest::Client, auth_url: &str) -> Option<String> {
         return None;
     }
     let data = resp.json::<Value>().await.ok()?;
-    data.get("token").and_then(|v| v.as_str()).map(|v| v.to_string())
+    data.get("token")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
 }
 
 async fn generate_sentence(
@@ -274,9 +286,34 @@ async fn generate_sentence(
         .as_ref()
         .map(|value| value.as_str())
         .unwrap_or("none");
-    let system = "Return a compact JSON object with keys \"sentence\" and \"translation\". No markdown.";
+    let system = "Return a compact JSON object with keys \"sentence\" and \"translation\". No markdown. Both the sentence and translation should read like a CEFR B1-level example.";
     let user = format!(
-        "Create a natural {source} sentence using the word \"{word}\". Provide its {target} translation. Translation hint: {hint}.",
+        "Create a natural {source} sentence using the word \"{word}\" at CEFR B1 level. Provide its {target} translation written with B1-level vocabulary and grammar. Translation hint: {hint}.",
+        source = payload.source_language,
+        target = payload.target_language,
+        word = payload.word,
+        hint = translation_hint
+    );
+    let content = call_openai(&state, key, system, &user).await?;
+    let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(data))
+}
+
+async fn generate_question(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<GenerateQuestionRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let Some(key) = state.openai_key.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let translation_hint = payload
+        .translation
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("none");
+    let system = "Return a compact JSON object with key \"question\". No markdown. Compose the question at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word or its meaning.";
+    let user = format!(
+        "Using the word \"{word}\" ({source}), create a {target}-language, CEFR B1-level question that asks the learner to respond with a sentence featuring that word or the related concept. Include the {target} translation hint: {hint}.",
         source = payload.source_language,
         target = payload.target_language,
         word = payload.word,
@@ -294,12 +331,18 @@ async fn grade_sentence(
     let Some(key) = state.openai_key.as_ref() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let system = "Return a compact JSON object with keys \"score\" (1-10), \"feedback\" (very short), and \"correction\" (a corrected sentence). No markdown.";
+    let question_context = payload
+        .question
+        .as_ref()
+        .map(|q| format!(" Question: \"{q}\"."))
+        .unwrap_or_default();
+    let system = "Return a compact JSON object with keys \"score\" (1-10), \"feedback\" (very short), and \"correction\" (a corrected sentence). No markdown. Focus on a CEFR B1-level evaluation.";
     let user = format!(
-        "Evaluate the user's {language} sentence for correct use of the word \"{word}\". Sentence: \"{sentence}\". Provide score 1-10, a short rubric, and a corrected sentence if needed.",
+        "Evaluate the user's {language} sentence for correct use of the word \"{word}\". Sentence: \"{sentence}\".{question_context} Provide a B1-level score (1-10), describe the issue in a concise rubric, and, if needed, offer a B1-level corrected sentence as the \"correction\" value.",
         language = payload.target_language,
         word = payload.word,
-        sentence = payload.user_sentence
+        sentence = payload.user_sentence,
+        question_context = question_context
     );
     let content = call_openai(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -352,7 +395,11 @@ async fn call_openai(
 }
 
 fn join_url(base: &str, path: &str) -> String {
-    format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 async fn proxy_request(
@@ -380,21 +427,14 @@ async fn proxy_request(
 
     let mut builder = proxy_client.request(method, target);
     builder = builder.headers(filter_proxy_headers(&headers));
-    let resp = builder
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|err| {
-            eprintln!("[proxy] upstream error: {err}");
-            StatusCode::BAD_GATEWAY
-        })?;
+    let resp = builder.body(body_bytes).send().await.map_err(|err| {
+        eprintln!("[proxy] upstream error: {err}");
+        StatusCode::BAD_GATEWAY
+    })?;
 
     let status = resp.status();
     let resp_headers = resp.headers().clone();
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let resp_body = resp.bytes().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     let mut response = Response::new(Body::from(resp_body));
     *response.status_mut() = status;

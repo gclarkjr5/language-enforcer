@@ -1,12 +1,12 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::process::Command;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::process::Command;
 
 use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -14,17 +14,17 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use directories::ProjectDirs;
 use dotenvy::dotenv;
 use le_core::{Language, SessionConfig, Word};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod db;
-use crate::db::{get_db_backend, Db, DbResult};
+use crate::db::{Db, DbResult, get_db_backend};
 
 const TICK_MS: u64 = 100;
 const TRANSLATE_DEBOUNCE_MS: u64 = 400;
@@ -54,7 +54,12 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let (translation_tx, translation_rx) = mpsc::channel();
-    let mut app = App::new(config.session, translation_api, translation_tx, translation_rx);
+    let mut app = App::new(
+        config.session,
+        translation_api,
+        translation_tx,
+        translation_rx,
+    );
 
     let res = run_app(&mut terminal, db.as_ref(), &mut app);
 
@@ -223,7 +228,9 @@ fn handle_review_list_key(_db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Res
         }
         KeyCode::Char('D') => {
             if !app.review_list.is_empty() {
-                let message = "WARNING: Delete ALL words and translations? This cannot be undone. (y/n)".to_string();
+                let message =
+                    "WARNING: Delete ALL words and translations? This cannot be undone. (y/n)"
+                        .to_string();
                 app.set_confirm(ConfirmAction::DeleteAll, message);
             }
             Ok(false)
@@ -352,10 +359,13 @@ fn handle_import_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bo
                 }
             };
             if chapter.is_empty() {
-                let chapters = db.list_chapters()
+                let chapters = db
+                    .list_chapters()
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
                 if chapters.is_empty() {
-                    app.set_message("No existing chapters found. Enter a chapter first.".to_string());
+                    app.set_message(
+                        "No existing chapters found. Enter a chapter first.".to_string(),
+                    );
                     return Ok(false);
                 }
                 app.chapter_select_list = chapters;
@@ -365,7 +375,8 @@ fn handle_import_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bo
                 return Ok(false);
             }
             let image_path = PathBuf::from("img").join(&image_name);
-            let initial_group = db.last_group_for_chapter(chapter)
+            let initial_group = db
+                .last_group_for_chapter(chapter)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             match run_ocr(OcrProviderKind::Vision, &image_path) {
                 Ok(lines) => match parse_grouped_items(&lines, initial_group) {
@@ -424,7 +435,8 @@ fn handle_import_preview_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::R
                 app.set_message("Missing TRANSLATION_API_URL for translation".to_string());
                 return Ok(false);
             };
-            let initial_group = db.last_group_for_chapter(chapter)
+            let initial_group = db
+                .last_group_for_chapter(chapter)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             match import_from_image(
                 db,
@@ -480,14 +492,19 @@ fn handle_chapter_select_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::R
                 app.mode = Mode::Import;
                 return Ok(false);
             };
-            let Some(chapter) = app.chapter_select_list.get(app.chapter_select_index).cloned() else {
+            let Some(chapter) = app
+                .chapter_select_list
+                .get(app.chapter_select_index)
+                .cloned()
+            else {
                 app.set_message("No chapter selected".to_string());
                 app.mode = Mode::Import;
                 return Ok(false);
             };
             app.import_chapter = chapter.clone();
             let image_path = PathBuf::from("img").join(&image_name);
-            let initial_group = db.last_group_for_chapter(&chapter)
+            let initial_group = db
+                .last_group_for_chapter(&chapter)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             match run_ocr(OcrProviderKind::Vision, &image_path) {
                 Ok(lines) => match parse_grouped_items(&lines, initial_group) {
@@ -663,7 +680,11 @@ fn render_import(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             let global_idx = start + idx;
             let line = format!(
                 "{} {}",
-                if global_idx == app.import_selection { ">" } else { " " },
+                if global_idx == app.import_selection {
+                    ">"
+                } else {
+                    " "
+                },
                 name
             );
             if global_idx == app.import_selection {
@@ -708,7 +729,9 @@ fn render_import_preview(frame: &mut ratatui::Frame, app: &mut App, area: Rect) 
         header.lines.push(Line::from(format!("Image: {}", path)));
     }
     if !app.import_chapter.trim().is_empty() {
-        header.lines.push(Line::from(format!("Chapter: {}", app.import_chapter)));
+        header
+            .lines
+            .push(Line::from(format!("Chapter: {}", app.import_chapter)));
     }
     header.lines.push(Line::from(format!(
         "Items: {}",
@@ -781,7 +804,11 @@ fn render_chapter_select(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             let global_idx = start + idx;
             let line = format!(
                 "{} {}",
-                if global_idx == app.chapter_select_index { ">" } else { " " },
+                if global_idx == app.chapter_select_index {
+                    ">"
+                } else {
+                    " "
+                },
                 chapter
             );
             if global_idx == app.chapter_select_index {
@@ -829,9 +856,26 @@ fn render_review_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         for (idx, item) in items[start..end].iter().enumerate() {
             let global_idx = start + idx;
             let (line, is_group) = match item {
-                ReviewListItem::Group { key, count, collapsed } => {
+                ReviewListItem::Group {
+                    key,
+                    count,
+                    collapsed,
+                } => {
                     let marker = if *collapsed { "[+]" } else { "[-]" };
-                    (format!("{} {} {} ({})", if global_idx == app.review_list_selection { ">" } else { " " }, marker, key, count), true)
+                    (
+                        format!(
+                            "{} {} {} ({})",
+                            if global_idx == app.review_list_selection {
+                                ">"
+                            } else {
+                                " "
+                            },
+                            marker,
+                            key,
+                            count
+                        ),
+                        true,
+                    )
                 }
                 ReviewListItem::Word { index } => {
                     let word = &app.review_list[*index];
@@ -839,7 +883,11 @@ fn render_review_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
                     (
                         format!(
                             "{}   [{}] {} -> {}",
-                            if global_idx == app.review_list_selection { ">" } else { " " },
+                            if global_idx == app.review_list_selection {
+                                ">"
+                            } else {
+                                " "
+                            },
                             language_label(word.language),
                             word.text,
                             translation
@@ -883,11 +931,15 @@ fn render_confirm(app: &App) -> Paragraph<'_> {
 
 fn render_footer(app: &App) -> Paragraph<'_> {
     let info = match app.mode {
-        Mode::Menu => "a add | c clipboard | i import | v review list | q quit | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
+        Mode::Menu => {
+            "a add | c clipboard | i import | v review list | q quit | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
+        }
         Mode::AddWord => {
             "Enter save | Tab switch | Esc clear | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
         }
-        Mode::ReviewList => "Up/Down or j/k move | Enter/Space toggle | d delete | D delete all | q back | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
+        Mode::ReviewList => {
+            "Up/Down or j/k move | Enter/Space toggle | d delete | D delete all | q back | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
+        }
         Mode::Import => "Up/Down or j/k move | Tab focus | Enter preview | Esc cancel",
         Mode::ImportPreview => "Up/Down or j/k scroll | y confirm import | n back | Esc back",
         Mode::ChapterSelect => "Up/Down or j/k move | Enter select | Esc back",
@@ -895,7 +947,11 @@ fn render_footer(app: &App) -> Paragraph<'_> {
         Mode::Message => "Any key back | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
     };
 
-    Paragraph::new(info).block(Block::default().borders(Borders::ALL).title("Control Command Center"))
+    Paragraph::new(info).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Control Command Center"),
+    )
 }
 
 fn language_label(language: Language) -> &'static str {
@@ -1213,7 +1269,10 @@ impl App {
             }
         }
 
-        if self.translation_in_flight || self.translation_api.is_none() || self.mode != Mode::AddWord {
+        if self.translation_in_flight
+            || self.translation_api.is_none()
+            || self.mode != Mode::AddWord
+        {
             return;
         }
 
@@ -1310,18 +1369,16 @@ impl App {
         }
 
         match result.result {
-            Ok(translated) => {
-                match result.direction {
-                    TranslateDirection::DutchToEnglish => {
-                        self.english_input = translated;
-                        self.last_translated_dutch_source = Some(pending.source_text);
-                    }
-                    TranslateDirection::EnglishToDutch => {
-                        self.dutch_input = translated;
-                        self.last_translated_english_source = Some(pending.source_text);
-                    }
+            Ok(translated) => match result.direction {
+                TranslateDirection::DutchToEnglish => {
+                    self.english_input = translated;
+                    self.last_translated_dutch_source = Some(pending.source_text);
                 }
-            }
+                TranslateDirection::EnglishToDutch => {
+                    self.dutch_input = translated;
+                    self.last_translated_english_source = Some(pending.source_text);
+                }
+            },
             Err(err) => {
                 self.set_message(format!("Translation failed: {err}"));
             }
@@ -1416,8 +1473,14 @@ struct ImportItem {
 
 #[derive(Debug, Clone)]
 enum ReviewListItem {
-    Group { key: String, count: usize, collapsed: bool },
-    Word { index: usize },
+    Group {
+        key: String,
+        count: usize,
+        collapsed: bool,
+    },
+    Word {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1556,7 +1619,11 @@ fn translate_batch_via_api(
     if response.translations.len() != texts.len() {
         return Err("Translation API response count mismatch".to_string());
     }
-    Ok(response.translations.into_iter().map(|item| item.text).collect())
+    Ok(response
+        .translations
+        .into_iter()
+        .map(|item| item.text)
+        .collect())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1567,7 +1634,8 @@ struct ConfigFile {
 fn load_config(path: &Path) -> io::Result<ConfigFile> {
     if path.exists() {
         let content = fs::read_to_string(path)?;
-        let cfg: ConfigFile = toml::from_str(&content).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        let cfg: ConfigFile =
+            toml::from_str(&content).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         Ok(cfg)
     } else {
         let cfg = ConfigFile {
@@ -1579,7 +1647,6 @@ fn load_config(path: &Path) -> io::Result<ConfigFile> {
         Ok(cfg)
     }
 }
-
 
 fn start_review_list(db: &dyn Db, app: &mut App) -> DbResult<()> {
     app.review_list = db.load_all_words()?;
@@ -1602,7 +1669,6 @@ fn reload_review_list(db: &dyn Db, app: &mut App) -> DbResult<()> {
     }
     Ok(())
 }
-
 
 fn review_group_key(word: &Word) -> String {
     let chapter = word.chapter.as_deref().unwrap_or("Unassigned");
@@ -1742,7 +1808,10 @@ fn run_vision_ocr(image_path: &Path) -> Result<Vec<OcrLine>, String> {
         .map_err(|err| format!("Failed to parse OCR output: {err}"))
 }
 
-fn parse_grouped_items(lines: &[OcrLine], initial_group: Option<String>) -> Result<Vec<ImportItem>, String> {
+fn parse_grouped_items(
+    lines: &[OcrLine],
+    initial_group: Option<String>,
+) -> Result<Vec<ImportItem>, String> {
     let mut entries: Vec<LineEntry> = lines
         .iter()
         .filter_map(|line| {
@@ -1774,7 +1843,11 @@ fn parse_grouped_items(lines: &[OcrLine], initial_group: Option<String>) -> Resu
     let mut current_group: Option<String> = initial_group;
     let mut items = Vec::new();
     for mut column in columns {
-        column.sort_by(|a, b| a.y_top.partial_cmp(&b.y_top).unwrap_or(std::cmp::Ordering::Equal));
+        column.sort_by(|a, b| {
+            a.y_top
+                .partial_cmp(&b.y_top)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for entry in column {
             let normalized = normalize_item_text(&entry.text);
             if normalized.is_empty() {
@@ -1784,7 +1857,9 @@ fn parse_grouped_items(lines: &[OcrLine], initial_group: Option<String>) -> Resu
                 current_group = Some(normalize_heading(&normalized));
                 continue;
             }
-            let group = current_group.clone().unwrap_or_else(|| "Ungrouped".to_string());
+            let group = current_group
+                .clone()
+                .unwrap_or_else(|| "Ungrouped".to_string());
             items.push(ImportItem {
                 text: normalized,
                 group,
@@ -1794,8 +1869,6 @@ fn parse_grouped_items(lines: &[OcrLine], initial_group: Option<String>) -> Resu
 
     Ok(items)
 }
-
- 
 
 fn split_into_columns(entries: &mut [LineEntry]) -> Vec<Vec<LineEntry>> {
     let mut columns: Vec<ColumnBucket> = Vec::new();
@@ -1822,7 +1895,11 @@ fn split_into_columns(entries: &mut [LineEntry]) -> Vec<Vec<LineEntry>> {
         columns.push(ColumnBucket::new(entry));
     }
 
-    columns.sort_by(|a, b| a.center.partial_cmp(&b.center).unwrap_or(std::cmp::Ordering::Equal));
+    columns.sort_by(|a, b| {
+        a.center
+            .partial_cmp(&b.center)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     columns.into_iter().map(|column| column.lines).collect()
 }
 
@@ -1866,7 +1943,8 @@ fn normalize_item_text(text: &str) -> String {
 
 fn looks_like_chapter_line(text: &str) -> bool {
     let lowered = text.to_lowercase();
-    if lowered.contains("hoofdstuk") || lowered.contains("chapter") || lowered.contains("hoolastuk") {
+    if lowered.contains("hoofdstuk") || lowered.contains("chapter") || lowered.contains("hoolastuk")
+    {
         return true;
     }
     if lowered.starts_with("hoo") && lowered.contains("stuk") {
