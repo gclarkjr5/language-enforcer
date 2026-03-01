@@ -57,6 +57,7 @@ struct AddWordInput {
     card_id: String,
     created_at: String,
     language: String,
+    allow_duplicate: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,16 +492,18 @@ fn apply_correction_local(app: tauri::AppHandle, input: CorrectionInput) -> Resu
 fn add_word_local(app: tauri::AppHandle, input: AddWordInput) -> Result<(), String> {
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM words WHERE lower(text) = lower(?1) AND lower(translation) = lower(?2) LIMIT 1",
-            params![input.text, input.translation.clone().unwrap_or_default()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|err| err.to_string())?;
-    if exists.is_some() {
-        return Err("Word already exists".to_string());
+    if !input.allow_duplicate {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM words WHERE lower(text) = lower(?1) LIMIT 1",
+                params![input.text],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
+        if exists.is_some() {
+            return Err("Word already exists".to_string());
+        }
     }
     conn.execute(
         "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)

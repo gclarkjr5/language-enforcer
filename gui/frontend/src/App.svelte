@@ -396,17 +396,29 @@
     }
     try {
       const created = await addWord({ text, translation })
+      if (created.duplicate) {
+        const existingInfo = created.existingTranslation
+          ? ` (existing translation: "${created.existingTranslation}")`
+          : ''
+        showAddMessage(`"${text}" already exists${existingInfo}`)
+        return
+      }
       if (isTauri) {
-        await invoke('add_word_local', {
-          input: {
-            text,
-            translation,
-            word_id: created.wordId,
-            card_id: created.cardId,
-            created_at: created.createdAt,
-            language: created.language
-          }
-        })
+        if (created.wordId && created.cardId && created.createdAt) {
+          await invoke('add_word_local', {
+            input: {
+              text,
+              translation,
+              word_id: created.wordId,
+              card_id: created.cardId,
+              created_at: created.createdAt,
+              language: created.language,
+              allow_duplicate: false
+            }
+          })
+        } else {
+          showAddMessage('Word added but failed to sync locally')
+        }
       }
       showToast('Word added')
       closeAdd()

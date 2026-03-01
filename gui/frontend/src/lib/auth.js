@@ -219,6 +219,28 @@ export async function updateWord({ wordId, text, translation }) {
   }
 }
 
+async function checkWordDuplicate(text, language = 'Dutch') {
+  const normalized = text.trim()
+  const url = new URL(`${DATA_API_URL}/words`)
+  url.searchParams.set('select', 'id,translation')
+  url.searchParams.set('language', `eq.${language}`)
+  url.searchParams.set('text', `ilike.${normalized}`)
+  const response = await fetch(url, {
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${authToken ?? ''}`
+    }
+  })
+  if (!response.ok) {
+    throw new Error(`Data API error: ${response.status} ${await response.text()}`)
+  }
+  const data = await response.json()
+  if (Array.isArray(data) && data.length > 0) {
+    return { duplicate: true, existingTranslation: data[0]?.translation ?? null }
+  }
+  return { duplicate: false, existingTranslation: null }
+}
+
 export async function addWord({ text, translation, language = 'Dutch' }) {
   await requireSession()
   const wordId = crypto.randomUUID()
@@ -226,26 +248,9 @@ export async function addWord({ text, translation, language = 'Dutch' }) {
   const createdAt = new Date().toISOString()
   const normalizedText = text.trim()
   const normalizedTranslation = translation?.trim() ?? ''
-  const checkUrl = new URL(`${DATA_API_URL}/words`)
-  checkUrl.searchParams.set(
-    'select',
-    'id'
-  )
-  checkUrl.searchParams.set('text', `ilike.${normalizedText}`)
-  checkUrl.searchParams.set('translation', `ilike.${normalizedTranslation}`)
-  checkUrl.searchParams.set('language', `eq.${language}`)
-  const checkResponse = await fetch(checkUrl, {
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${authToken ?? ''}`
-    }
-  })
-  if (!checkResponse.ok) {
-    throw new Error(`Data API error: ${checkResponse.status} ${await checkResponse.text()}`)
-  }
-  const existing = await checkResponse.json()
-  if (Array.isArray(existing) && existing.length > 0) {
-    throw new Error('Word already exists')
+  const duplicateCheck = await checkWordDuplicate(normalizedText, language)
+  if (duplicateCheck.duplicate) {
+    return { duplicate: true, existingTranslation: duplicateCheck.existingTranslation }
   }
   const word = {
     id: wordId,
@@ -303,7 +308,15 @@ export async function addWord({ text, translation, language = 'Dutch' }) {
       throw new Error(cardResult.error.message)
     }
   }
-  return { wordId, cardId, createdAt, language }
+
+  return {
+    wordId,
+    cardId,
+    createdAt,
+    language,
+    duplicate: false,
+    existingTranslation: null
+  }
 }
 
 export async function generateSentence({ word, translation, sourceLanguage, targetLanguage }) {
