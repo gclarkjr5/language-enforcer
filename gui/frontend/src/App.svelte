@@ -8,6 +8,7 @@
     fetchDataApiSnapshot,
     updateWord,
     addWord,
+    addConcept,
     generateSentence,
     generateQuestion,
     gradeSentence,
@@ -25,6 +26,7 @@
   let specialSentence = ''
   let specialTranslation = ''
   let specialQuestion = ''
+  let specialConcept = ''
   let specialInput = ''
   let specialFeedback = ''
   let specialCorrection = ''
@@ -50,6 +52,11 @@
   let addTranslation = ''
   let addMessage = ''
   let addTimer = null
+  let concepts = []
+  let showConceptModal = false
+  let conceptInput = ''
+  let conceptMessage = ''
+  let conceptTimer = null
   let showDeleteConfirm = false
   let deleteError = ''
   let deleteLoading = false
@@ -155,6 +162,7 @@
     specialSentence = ''
     specialTranslation = ''
     specialQuestion = ''
+    specialConcept = ''
     specialInput = ''
     specialFeedback = ''
     specialCorrection = ''
@@ -173,6 +181,14 @@
   function pickSpecialType() {
     const options = ['translate', 'create', 'question']
     return options[Math.floor(Math.random() * options.length)]
+  }
+
+  function pickConcept() {
+    if (!concepts || concepts.length === 0) {
+      return ''
+    }
+    const index = Math.floor(Math.random() * concepts.length)
+    return concepts[index]
   }
 
   async function refreshCounts() {
@@ -208,6 +224,7 @@
       }
       if (next && sessionActive && reviewedThisSession === specialIndex) {
         specialActive = true
+        specialConcept = pickConcept()
         if (specialType === 'translate') {
           if (!next?.translation) {
             specialType = 'create'
@@ -219,7 +236,8 @@
                 word: next.text,
                 translation: next.translation,
                 sourceLanguage: next.language,
-                targetLanguage: targetLanguageFor(next.language)
+                targetLanguage: targetLanguageFor(next.language),
+                concept: specialConcept || undefined
               })
               specialSentence = result?.sentence ?? ''
               specialTranslation = result?.translation ?? ''
@@ -233,13 +251,14 @@
           showReverse = false
           specialQuestion = ''
           specialLoading = true
-          try {
-            const result = await generateQuestion({
-              word: next.text,
-              translation: next.translation,
-              sourceLanguage: next.language,
-              targetLanguage: targetLanguageFor(next.language)
-            })
+            try {
+              const result = await generateQuestion({
+                word: next.text,
+                translation: next.translation,
+                sourceLanguage: next.language,
+                targetLanguage: targetLanguageFor(next.language),
+                concept: specialConcept || undefined
+              })
             specialQuestion = result?.question ?? ''
             if (!specialQuestion) {
               specialError = 'No question available'
@@ -453,6 +472,67 @@
     }, 2000)
   }
 
+  function showConceptMessage(message) {
+    conceptMessage = message
+    if (conceptTimer) clearTimeout(conceptTimer)
+    conceptTimer = setTimeout(() => {
+      conceptMessage = ''
+      conceptTimer = null
+    }, 2000)
+  }
+
+  async function fetchConcepts() {
+    if (!isTauri) return
+    try {
+      const result = await invoke('list_concepts')
+      if (Array.isArray(result)) {
+        concepts = result
+      }
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  function openConceptModal() {
+    conceptInput = ''
+    conceptMessage = ''
+    showConceptModal = true
+  }
+
+  function closeConceptModal() {
+    showConceptModal = false
+    conceptMessage = ''
+  }
+
+  async function submitConcept() {
+    const text = conceptInput.trim()
+    if (!text) {
+      showConceptMessage('Concept cannot be empty')
+      return
+    }
+    if (!isTauri) {
+      showConceptMessage('Concepts require the desktop app.')
+      return
+    }
+    try {
+      const created = await addConcept({ name: text })
+      if (isTauri) {
+        await invoke('add_concept_local', {
+          input: {
+            id: created.id,
+            name: created.name,
+            created_at: created.createdAt
+          }
+        })
+      }
+      showConceptMessage('Concept saved')
+      conceptInput = ''
+      await fetchConcepts()
+    } catch (err) {
+      showConceptMessage(String(err))
+    }
+  }
+
   async function submitAdd() {
     loading = true
     error = ''
@@ -517,12 +597,13 @@
       return
     }
     try {
-      const result = await gradeSentence({
-        word: current.text,
-        targetLanguage: current.language,
-        userSentence: sentence,
-        question: specialType === 'question' ? specialQuestion : undefined
-      })
+        const result = await gradeSentence({
+          word: current.text,
+          targetLanguage: current.language,
+          userSentence: sentence,
+          question: specialType === 'question' ? specialQuestion : undefined,
+          concept: specialConcept || undefined
+        })
       specialScore = result?.score ?? null
       specialFeedback = result?.feedback ?? ''
       specialCorrection = result?.correction ?? ''
@@ -563,6 +644,7 @@
       await invoke('start_session')
       await refreshCounts()
       await loadNext()
+      await fetchConcepts()
     } catch (err) {
       error = String(err)
     } finally {
@@ -653,6 +735,7 @@
     } catch (err) {
       error = String(err)
     }
+    await fetchConcepts()
   })
 
   onDestroy(() => {
@@ -676,6 +759,7 @@
     </div>
     <div class="header-actions">
       <button class="ghost" on:click={syncFromPostgres} disabled={isBusy}>Refresh Data</button>
+      <button class="ghost" on:click={openConceptModal} disabled={isBusy}>Add Concept</button>
       <button class="ghost" on:click={openAdd} disabled={isBusy}>Add Word</button>
     </div>
   </header>
@@ -686,14 +770,14 @@
 
   {#if showDeleteConfirm}
     <div
-      class="modal-backdrop"
+      class="modal-backdrop delete-confirm"
       role="button"
       tabindex="0"
       aria-label="Confirm delete dialog"
       on:click={closeDeleteConfirm}
       on:keydown={(event) => handleBackdropKey(event, closeDeleteConfirm)}>
-      <div
-        class="modal"
+        <div
+          class="modal delete-confirm-modal"
         role="dialog"
         aria-modal="true"
         tabindex="0"
@@ -864,6 +948,47 @@
     </div>
   {/if}
 
+  {#if showConceptModal}
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Close concept dialog"
+      on:click={closeConceptModal}
+      on:keydown={(event) => handleBackdropKey(event, closeConceptModal)}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
+        <h2>Add concept</h2>
+        {#if conceptMessage}
+          <div class="modal-note">{conceptMessage}</div>
+        {/if}
+        <label class="field">
+          <span>Concept</span>
+          <input bind:value={conceptInput} placeholder="e.g. separable verb order" />
+        </label>
+        {#if concepts.length}
+          <div class="concept-list">
+            <strong>Existing concepts</strong>
+            <ul>
+              {#each concepts as concept}
+                <li>{concept}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+        <div class="modal-actions">
+          <button class="grade" on:click={submitConcept} disabled={isBusy}>Save</button>
+          <button class="ghost" on:click={closeConceptModal} disabled={isBusy}>Close</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if showLoadingCard}
     <div class="card">Loading…</div>
   {:else if !current}
@@ -875,6 +1000,9 @@
     <div class="card">
       <div class="tagline">{current.chapter ?? 'Unassigned'} • {current.group ?? 'Ungrouped'}</div>
       {#if specialActive}
+        {#if specialConcept}
+          <div class="modal-note concept-note">Concept: {specialConcept}</div>
+        {/if}
         {#if specialType === 'translate'}
           <div class="prompt">{specialSentence || (specialLoading ? 'Generating…' : 'No sentence available')}</div>
           {#if showAnswer}
@@ -1206,6 +1334,9 @@
     justify-content: center;
     z-index: 20;
   }
+  .modal-backdrop.delete-confirm {
+    z-index: 30;
+  }
   .modal {
     background: #111827;
     padding: 24px;
@@ -1219,12 +1350,47 @@
     gap: 12px;
     justify-content: center;
   }
+  .modal.delete-confirm-modal {
+    z-index: 31;
+  }
   .modal-note {
     margin: 8px 0 12px;
     padding: 8px 10px;
     border-radius: 8px;
     background: #1e293b;
     color: #cbd5f5;
+    font-size: 12px;
+  }
+  .concept-note {
+    background: #1d4ed8;
+    color: #dbeafe;
+  }
+  .concept-list {
+    margin-top: 12px;
+    border-radius: 10px;
+    padding: 10px;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+  }
+  .concept-list strong {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #94a3b8;
+  }
+  .concept-list ul {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .concept-list li {
+    background: #1e293b;
+    padding: 4px 8px;
+    border-radius: 6px;
     font-size: 12px;
   }
 </style>

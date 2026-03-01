@@ -1,52 +1,76 @@
-# Language Enforcer (TUI)
+# Language Enforcer
 
-## Run
+Language Enforcer is a Rust + Svelte/Tauri stack that keeps a local SuperMemo-style
+flashcard database synchronized with Neon/Postgres, layers in AI-assisted sentence
+practice, and provides both a command-line TUI workflow and a polished iOS/desktop GUI.
 
-1. Install Rust (stable).
-2. From the repo root:
+## Repository layout
 
-```sh
-cargo run -p tui
-```
+- `tui/`: the command-line review interface and import workflows (OCR, translation, NeDB
+  sync scripts). Run it with `cargo run -p tui`.
+- `gui/`: the Tauri-powered desktop/ mobile UI plus Svelte frontend under `gui/frontend`.
+  Bundled with a local SQLite mirror of the deck and integrations to the auth server.
+- `auth-server/`: lightweight Axum service acting as a proxy between the GUI and Neon
+  Auth/Data APIs; also hosts the OpenAI prompts for sentence generation/checking.
+- `core/`, `scripts/`, `data/`, etc.: shared logic, helper scripts (Vision OCR, migrations),
+  and the seeded SQLite `data/words.db`.
 
-Data lives in `data/` (`data/words.db`, `data/config.toml`).
+## Running the key pieces
 
-## Import Vocabulary Images (Vision OCR)
+### TUI review flow
 
-You can import a photo of a vocabulary list and have it grouped by headings, translated,
-and saved with chapter/group metadata from inside the TUI.
+1. Install Rust 1.72+ (stable channel).
+2. Seed `data/words.db` by copying `data/words.db` or creating a new one.
+3. Run `cargo run -p tui` from the repo root and follow the on-screen menu (press `i`
+   to load OCR imports, `Ctrl+V` to open the review list, etc.).
+4. Configure `TRANSLATION_API_*` env vars when you want live translations during imports
+   (e.g., DeepL via `TRANSLATION_API_URL=https://api-free.deepl.com/v2/translate`).
 
-TUI:
+### GUI & mobile app
 
-- Press `i` from the menu (or `Ctrl+O`) and select an image from `img/`.
-- Enter the chapter manually in the import screen before previewing.
-- If you leave it blank, you'll be prompted to pick an existing chapter.
+1. Install Node 18+, run `npm install` inside `gui/frontend`.
+2. Start the dev workflow with `npm run dev -- --host 0.0.0.0` and keep Vite running.
+3. Run `cargo tauri ios dev` (or `cargo tauri dev` on desktop) to launch the Tauri shell
+   that points to the Vite server.
+4. The GUI expects `auth-server` to be running locally (see below) and will fall back
+   to the bundled SQLite when offline.
 
-Notes:
-- OCR is currently implemented via macOS Vision in `scripts/vision_ocr.swift`.
-- The OCR provider is intentionally pluggable so other engines can be added later.
+### Auth server
 
-## Review List Controls
+1. Copy `.env.example` (or set envs manually). Required values include:
+   - `NEON_AUTH_URL`, `NEON_DATA_API_URL`, `DATABASE_URL`, `BIND_ADDR`.
+   - `OPENAI_API_KEY` (+ `OPENAI_MODEL`) for sentence/question generation.
+   - `ALLOWED_ORIGIN` (ngrok or local URL for the GUI).
+2. From `auth-server/`, run `cargo run` (or use the included Docker/Fly configs for
+   deployment). It proxies sign-in/sign-up calls and exposes `/ai/*` endpoints used by
+   the GUI’s sentence/question flows.
 
-- `Ctrl+V` open review list
-- `Up/Down` or `j/k` move selection
-- `d` delete selected entry (with confirmation)
-- `D` delete all entries (with confirmation)
-- `q` return
+## Data flow and storage
 
-## Translation Backend (DeepL example)
+- `data/words.db` seeds the GUI/TUI SQLite mirror; the CLI/Tauri apps copy it on startup.
+- The GUI keeps Postgres in sync by invoking the Neon Data API via the auth server when
+  signed in, while `add_word_local`/`delete_word_local` keep the local DB consistent.
+- `concepts` are stored in both Neon and the local `concepts` table so the GUI can pick
+  a random construction per card; the snapshot fetch (`fetchDataApiSnapshot`) now also
+  pulls `/concepts` to keep the mirror in sync.
+- AI prompts live in `auth-server/src/main.rs` and expect the front-end to provide the
+  current word, optional translation hint, and any selected concept.
 
-The app stores translations locally so reviews work offline. Live, debounced translation
-in the Add Word screen pulls from a translation API using environment variables like in `ptrui`:
+> **Neon schema note:** create a `concepts` table in your Neon database so these
+> entries are shared across devices:
+>
+> ```sql
+> CREATE TABLE IF NOT EXISTS concepts (
+>   id TEXT PRIMARY KEY,
+>   name TEXT NOT NULL UNIQUE,
+>   created_at TEXT NOT NULL
+> );
+> ```
 
-```sh
-TRANSLATION_API_URL="https://api-free.deepl.com/v2/translate" \
-TRANSLATION_API_KEY="YOUR_DEEPL_API_KEY" \
-TRANSLATION_API_AUTH_HEADER="DeepL-Auth-Key" \
-cargo run -p tui
-```
+## Tips
 
-Notes:
-- `TRANSLATION_API_URL` is required for live translation.
-- `TRANSLATION_API_KEY` and `TRANSLATION_API_AUTH_HEADER` are optional; if you use
-  DeepL, set the header to `DeepL-Auth-Key`.
+- Use `ngrok http 8787` (or a deployed host) and point `VITE_AUTH_SERVER_URL` at it when
+  testing sign-in/AI features from iOS or the bundled app.
+- Run `cargo fmt` regularly—the Rust workspace prefers the canonical formatting.
+- Changes to `gui/frontend` require `npm run build` (and the packaged assets are bundled
+  by Tauri during `cargo tauri ios/dev build`).

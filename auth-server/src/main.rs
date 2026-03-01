@@ -38,6 +38,7 @@ struct GenerateSentenceRequest {
     translation: Option<String>,
     source_language: String,
     target_language: String,
+    concept: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +47,7 @@ struct GenerateQuestionRequest {
     translation: Option<String>,
     source_language: String,
     target_language: String,
+    concept: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +56,7 @@ struct GradeSentenceRequest {
     target_language: String,
     user_sentence: String,
     question: Option<String>,
+    concept: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,13 +289,24 @@ async fn generate_sentence(
         .as_ref()
         .map(|value| value.as_str())
         .unwrap_or("none");
+    let concept = sanitize_concept(&payload.concept);
+    let concept_note = concept
+        .as_ref()
+        .map(|value| {
+            format!(
+                " Focus on incorporating the concept \"{value}\".",
+                value = value
+            )
+        })
+        .unwrap_or_default();
     let system = "Return a compact JSON object with keys \"sentence\" and \"translation\". No markdown. Both the sentence and translation should read like a CEFR B1-level example.";
     let user = format!(
-        "Create a natural {source} sentence using the word \"{word}\" at CEFR B1 level. Provide its {target} translation written with B1-level vocabulary and grammar. Translation hint: {hint}.",
+        "Create a natural {source} sentence using the word \"{word}\" at CEFR B1 level. Provide its {target} translation written with B1-level vocabulary and grammar. Translation hint: {hint}.{concept_note}",
         source = payload.source_language,
         target = payload.target_language,
         word = payload.word,
-        hint = translation_hint
+        hint = translation_hint,
+        concept_note = concept_note
     );
     let content = call_openai(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -306,18 +320,17 @@ async fn generate_question(
     let Some(key) = state.openai_key.as_ref() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let translation_hint = payload
-        .translation
+    let concept = sanitize_concept(&payload.concept);
+    let concept_note = concept
         .as_ref()
-        .map(|value| value.as_str())
-        .unwrap_or("none");
-    let system = "Return a compact JSON object with key \"question\". No markdown. Compose the question at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word or its meaning.";
+        .map(|value| format!(" Incorporate the concept \"{value}\" into the scenario.", value = value))
+        .unwrap_or_default();
+    let system = "Return a compact JSON object with key \"question\". No markdown. Compose the question in Dutch at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word and any highlighted concept.";
     let user = format!(
-        "Using the word \"{word}\" ({source}), create a {target}-language, CEFR B1-level question that asks the learner to respond with a sentence featuring that word or the related concept. Include the {target} translation hint: {hint}.",
+        "Using the word \"{word}\" ({source}), craft a Dutch CEFR B1 question that asks the learner to reply with a Dutch sentence featuring the word{concept_note} Respond only with the question itself.",
         source = payload.source_language,
-        target = payload.target_language,
         word = payload.word,
-        hint = translation_hint
+        concept_note = concept_note
     );
     let content = call_openai(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -336,13 +349,24 @@ async fn grade_sentence(
         .as_ref()
         .map(|q| format!(" Question: \"{q}\"."))
         .unwrap_or_default();
+    let concept = sanitize_concept(&payload.concept);
+    let concept_context = concept
+        .as_ref()
+        .map(|value| {
+            format!(
+                " Consider the concept \"{value}\" when evaluating the sentence.",
+                value = value
+            )
+        })
+        .unwrap_or_default();
     let system = "Return a compact JSON object with keys \"score\" (1-10), \"feedback\" (very short), and \"correction\" (a corrected sentence). No markdown. Focus on a CEFR B1-level evaluation.";
     let user = format!(
-        "Evaluate the user's {language} sentence for correct use of the word \"{word}\". Sentence: \"{sentence}\".{question_context} Provide a B1-level score (1-10), describe the issue in a concise rubric, and, if needed, offer a B1-level corrected sentence as the \"correction\" value.",
+        "Evaluate the user's {language} sentence for correct use of the word \"{word}\". Sentence: \"{sentence}\".{question_context}{concept_context} Provide a B1-level score (1-10), describe the issue in a concise rubric, and, if needed, offer a B1-level corrected sentence as the \"correction\" value.",
         language = payload.target_language,
         word = payload.word,
         sentence = payload.user_sentence,
-        question_context = question_context
+        question_context = question_context,
+        concept_context = concept_context
     );
     let content = call_openai(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -400,6 +424,14 @@ fn join_url(base: &str, path: &str) -> String {
         base.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+fn sanitize_concept(concept: &Option<String>) -> Option<String> {
+    concept
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.replace('"', "'"))
 }
 
 async fn proxy_request(

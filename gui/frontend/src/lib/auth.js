@@ -180,7 +180,8 @@ export async function fetchDataApiSnapshot() {
   )
   const cards = await fetchAll('cards', 'id,word_id,due_at,interval_days,ease,reps,lapses')
   const reviews = await fetchAll('reviews', 'id,card_id,grade,reviewed_at')
-  return { words, cards, reviews }
+  const concepts = await fetchAll('concepts', 'id,name,created_at')
+  return { words, cards, reviews, concepts }
 }
 
 export async function updateWord({ wordId, text, translation }) {
@@ -343,7 +344,13 @@ export async function addWord({ text, translation, language = 'Dutch' }) {
   }
 }
 
-export async function generateSentence({ word, translation, sourceLanguage, targetLanguage }) {
+export async function generateSentence({
+  word,
+  translation,
+  sourceLanguage,
+  targetLanguage,
+  concept
+}) {
   const response = await fetch(`${AUTH_SERVER_URL}/ai/generate-sentence`, {
     method: 'POST',
     headers: {
@@ -353,7 +360,8 @@ export async function generateSentence({ word, translation, sourceLanguage, targ
       word,
       translation,
       source_language: sourceLanguage,
-      target_language: targetLanguage
+      target_language: targetLanguage,
+      concept
     })
   })
   if (!response.ok) {
@@ -362,7 +370,44 @@ export async function generateSentence({ word, translation, sourceLanguage, targ
   return response.json()
 }
 
-export async function generateQuestion({ word, translation, sourceLanguage, targetLanguage }) {
+export async function addConcept({ name }) {
+  await requireSession()
+  if (!authToken) {
+    throw new Error('You must be signed in to create a concept.')
+  }
+  const conceptId = crypto.randomUUID()
+  const createdAt = new Date().toISOString()
+  const payloadName = name.trim()
+  if (!payloadName) {
+    throw new Error('Concept cannot be empty.')
+  }
+  const response = await fetch(`${DATA_API_URL}/concepts`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${authToken}`,
+      'content-type': 'application/json',
+      prefer: 'return=representation'
+    },
+    body: JSON.stringify({
+      id: conceptId,
+      name: payloadName,
+      created_at: createdAt
+    })
+  })
+  if (!response.ok) {
+    throw new Error(`Data API error: ${response.status} ${await response.text()}`)
+  }
+  return { id: conceptId, name: payloadName, createdAt }
+}
+
+export async function generateQuestion({
+  word,
+  translation,
+  sourceLanguage,
+  targetLanguage,
+  concept
+}) {
   const response = await fetch(`${AUTH_SERVER_URL}/ai/generate-question`, {
     method: 'POST',
     headers: {
@@ -372,7 +417,8 @@ export async function generateQuestion({ word, translation, sourceLanguage, targ
       word,
       translation,
       source_language: sourceLanguage,
-      target_language: targetLanguage
+      target_language: targetLanguage,
+      concept
     })
   })
   if (!response.ok) {
@@ -381,7 +427,7 @@ export async function generateQuestion({ word, translation, sourceLanguage, targ
   return response.json()
 }
 
-export async function gradeSentence({ word, targetLanguage, userSentence, question }) {
+export async function gradeSentence({ word, targetLanguage, userSentence, question, concept }) {
   const response = await fetch(`${AUTH_SERVER_URL}/ai/grade-sentence`, {
     method: 'POST',
     headers: {
@@ -391,7 +437,8 @@ export async function gradeSentence({ word, targetLanguage, userSentence, questi
       word,
       target_language: targetLanguage,
       user_sentence: userSentence,
-      question
+      question,
+      concept
     })
   })
   if (!response.ok) {

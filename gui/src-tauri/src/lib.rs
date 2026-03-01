@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use le_core::{Card, default_new_card, schedule_sm2};
@@ -67,6 +67,13 @@ struct DeleteWordInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct ConceptInput {
+    id: String,
+    name: String,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct WordRow {
     id: String,
     text: String,
@@ -75,6 +82,13 @@ struct WordRow {
     chapter: Option<String>,
     group_name: Option<String>,
     sentence: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConceptRow {
+    id: String,
+    name: String,
     created_at: String,
 }
 
@@ -102,6 +116,7 @@ struct DataApiSnapshot {
     words: Vec<WordRow>,
     cards: Vec<CardRow>,
     reviews: Vec<ReviewRow>,
+    concepts: Vec<ConceptRow>,
 }
 
 #[derive(Default)]
@@ -183,7 +198,13 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
             grade INTEGER NOT NULL,
             reviewed_at TEXT NOT NULL,
             FOREIGN KEY(card_id) REFERENCES cards(id)
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS concepts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
+        ",
     )?;
     ensure_seen_count(&conn)?;
     Ok(conn)
@@ -607,6 +628,36 @@ fn delete_word_local(app: tauri::AppHandle, input: DeleteWordInput) -> Result<()
     tx.commit().map_err(|err| err.to_string())?;
     Ok(())
 }
+
+#[command]
+fn list_concepts(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let db_path = app_db_path(&app)?;
+    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT name FROM concepts ORDER BY name")
+        .map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+    let mut concepts = Vec::new();
+    for row in rows {
+        concepts.push(row.map_err(|err| err.to_string())?);
+    }
+    Ok(concepts)
+}
+
+#[command]
+fn add_concept_local(app: tauri::AppHandle, input: ConceptInput) -> Result<(), String> {
+    let db_path = app_db_path(&app)?;
+    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO concepts (id, name, created_at) VALUES (?1, ?2, ?3)",
+        params![input.id, input.name, input.created_at],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 #[command]
 fn refresh_from_postgres(
     app: tauri::AppHandle,
@@ -621,7 +672,7 @@ fn refresh_from_postgres(
         log_error(&message);
         message
     })?;
-    let query = "DELETE FROM reviews; DELETE FROM cards; DELETE FROM words;";
+    let query = "DELETE FROM reviews; DELETE FROM cards; DELETE FROM words; DELETE FROM concepts;";
     log_sql(query, &[]);
     tx.execute_batch(query).map_err(|err| {
         let message = format!("refresh_from_postgres: clear sqlite tables failed: {err}");
@@ -731,6 +782,36 @@ fn refresh_from_postgres(
         })?;
         review_count += 1;
     }
+    log_sql("DELETE FROM concepts", &[]);
+    tx.execute("DELETE FROM concepts", []).map_err(|err| {
+        let message = format!("refresh_from_postgres: clear concepts failed: {err}");
+        log_error(&message);
+        message
+    })?;
+    let concept_rows = client.query("SELECT id, name, created_at FROM concepts", &[]);
+    match concept_rows {
+        Ok(rows) => {
+            for row in rows {
+                tx.execute(
+                    "INSERT INTO concepts (id, name, created_at) VALUES (?1, ?2, ?3)",
+                    params![
+                        row.get::<_, String>(0),
+                        row.get::<_, String>(1),
+                        row.get::<_, String>(2)
+                    ],
+                )
+                .map_err(|err| {
+            let message = format!("refresh_from_postgres: insert concept failed: {err}");
+            log_error(&message);
+            message
+        })?;
+            }
+        }
+        Err(err) => {
+            let message = format!("refresh_from_postgres: select concepts failed: {err}");
+            log_error(&message);
+        }
+    }
 
     tx.commit().map_err(|err| {
         let message = format!("refresh_from_postgres: commit failed: {err}");
@@ -822,6 +903,18 @@ fn refresh_from_data_api(
         })?;
     }
 
+    for row in &snapshot.concepts {
+        tx.execute(
+            "INSERT INTO concepts (id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![row.id, row.name, row.created_at],
+        )
+        .map_err(|err| {
+            let message = format!("refresh_from_data_api: insert concept failed: {err}");
+            log_error(&message);
+            message
+        })?;
+    }
+
     tx.commit().map_err(|err| {
         let message = format!("refresh_from_data_api: commit failed: {err}");
         log_error(&message);
@@ -873,6 +966,8 @@ pub fn run() {
             apply_correction_local,
             add_word_local,
             delete_word_local,
+            list_concepts,
+            add_concept_local,
             refresh_from_postgres,
             refresh_from_data_api,
             counts

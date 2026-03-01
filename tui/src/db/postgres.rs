@@ -88,10 +88,17 @@ impl Db for PostgresDb {
                 grade INTEGER NOT NULL,
                 reviewed_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS concepts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
             GRANT USAGE ON SCHEMA public TO authenticated;
             GRANT SELECT, INSERT, UPDATE, DELETE ON public.words TO authenticated;
             GRANT SELECT, INSERT, UPDATE, DELETE ON public.cards TO authenticated;
             GRANT SELECT, INSERT, UPDATE, DELETE ON public.reviews TO authenticated;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON public.concepts TO authenticated;
             ",
         )?;
         Ok(())
