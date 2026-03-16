@@ -37,8 +37,6 @@
   let showLoadingCard = false
   let syncing = false
   let error = ''
-  let dueCount = 0
-  let totalCount = 0
   let sessionActive = false
   let showSessionPrompt = false
   let reviewedThisSession = 0
@@ -191,17 +189,6 @@
     return concepts[index]
   }
 
-  async function refreshCounts() {
-    try {
-      if (!isTauri) return
-      const [due, total] = await invoke('counts')
-      dueCount = due
-      totalCount = total
-    } catch (err) {
-      console.error(err)
-    }
-  }
-
   async function loadNext({ silent = false } = {}) {
     if (!silent) {
       loading = true
@@ -296,7 +283,6 @@
       sessionActive = true
       specialIndex = Math.floor(Math.random() * 10)
       specialType = pickSpecialType()
-      await refreshCounts()
       await loadNext({ silent: true })
     } catch (err) {
       if (isAuthRequiredError(err)) {
@@ -318,7 +304,6 @@
       if (!isTauri) return
       await invoke('grade_card', { input: { card_id: current.card_id, grade: value } })
       reviewedThisSession += 1
-      await refreshCounts()
       await loadNext({ silent: true })
     } catch (err) {
       error = String(err)
@@ -450,7 +435,6 @@
       showToast('Word deleted')
       showFix = false
       closeDeleteConfirm()
-      await refreshCounts()
       await loadNext({ silent: true })
     } catch (err) {
       if (isAuthRequiredError(err)) {
@@ -578,7 +562,6 @@
       }
       showToast('Word added')
       closeAdd()
-      await refreshCounts()
     } catch (err) {
       showAddMessage(String(err))
       error = ''
@@ -642,7 +625,6 @@
       specialIndex = Math.floor(Math.random() * 10)
       specialType = pickSpecialType()
       await invoke('start_session')
-      await refreshCounts()
       await loadNext()
       await fetchConcepts()
     } catch (err) {
@@ -717,7 +699,6 @@
 
   onMount(async () => {
     window.addEventListener('keydown', handleKey)
-    await refreshCounts()
     await startSession()
     try {
       await refreshAuthState()
@@ -755,7 +736,6 @@
         <div class="toast">{toastMessage}</div>
       {/if}
       <h1>Language Enforcer</h1>
-      <p class="meta">Due: {dueCount} / {totalCount}</p>
     </div>
     <div class="header-actions">
       <button class="ghost" on:click={syncFromPostgres} disabled={isBusy}>Refresh Data</button>
@@ -1018,6 +998,11 @@
         {:else if specialType === 'question'}
           <div class="prompt">
             {specialQuestion || (specialLoading ? 'Generating question…' : 'No question available')}
+            {#if specialQuestion}
+              <span class="prompt-instruction">
+                (Answer in Dutch using "{current?.text ?? current?.translation ?? 'the word'}"{specialConcept ? ` and the concept "${specialConcept}"` : ''}.)
+              </span>
+            {/if}
           </div>
           <textarea
             class="field-input"
@@ -1234,6 +1219,12 @@
     margin-bottom: 18px;
     overflow-wrap: anywhere;
     word-break: break-word;
+  }
+  .prompt-instruction {
+    display: block;
+    font-size: 12px;
+    color: #94a3b8;
+    margin-top: 6px;
   }
   .answer {
     font-size: clamp(18px, 3.6vw, 28px);

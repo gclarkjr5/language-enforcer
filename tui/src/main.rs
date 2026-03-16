@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
+use chrono::{Duration as ChronoDuration, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use directories::ProjectDirs;
@@ -135,8 +136,11 @@ fn handle_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
                 app.start_import();
                 return Ok(false);
             }
-            KeyCode::Char('o') => {
-                app.start_import();
+            KeyCode::Char('k') => {
+                if let Err(err) = begin_cleanup_review(db, app) {
+                    app.set_message(err);
+                    app.mode = Mode::Message;
+                }
                 return Ok(false);
             }
             _ => {}
@@ -155,6 +159,7 @@ fn handle_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
             app.mode = Mode::AddWord;
             Ok(false)
         }
+        Mode::CleanupReview => handle_cleanup_key(db, app, key),
     }
 }
 
@@ -196,6 +201,38 @@ fn handle_menu_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool
         }
         _ => Ok(false),
     }
+}
+
+fn handle_cleanup_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
+    match key.code {
+        KeyCode::Char('q') => {
+            app.cancel_cleanup(Some("Cleanup review canceled".to_string()));
+            Ok(false)
+        }
+        KeyCode::Char('y') => {
+            if let Some(current) = app.cleanup_current().cloned() {
+                db.update_translation(current.word_id, &current.suggestion)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+                mark_cleanup_reviewed(db, current.word_id)?;
+                app.record_cleanup_acceptance();
+            }
+            app.advance_cleanup();
+            Ok(false)
+        }
+        KeyCode::Char('n') | KeyCode::Char('s') => {
+            if let Some(current) = app.cleanup_current().cloned() {
+                mark_cleanup_reviewed(db, current.word_id)?;
+            }
+            app.advance_cleanup();
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn mark_cleanup_reviewed(db: &dyn Db, word_id: Uuid) -> io::Result<()> {
+    db.record_cleanup(word_id, Utc::now())
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
 }
 
 fn handle_review_list_key(_db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<bool> {
@@ -540,11 +577,12 @@ fn ui(frame: &mut ratatui::Frame, app: &mut App) {
         Mode::ChapterSelect => render_chapter_select(frame, app, chunks[0]),
         Mode::Confirm => frame.render_widget(render_confirm(app), chunks[0]),
         Mode::Message => frame.render_widget(render_message(app), chunks[0]),
+        Mode::CleanupReview => render_cleanup_review(frame, app, chunks[0]),
     }
     frame.render_widget(render_footer(app), chunks[1]);
 }
 
-fn render_menu(app: &App) -> Paragraph<'_> {
+fn render_menu(_app: &App) -> Paragraph<'_> {
     let mut text = Text::default();
     text.lines.push(Line::from("Language Enforcer"));
     text.lines.push(Line::from(""));
@@ -552,6 +590,7 @@ fn render_menu(app: &App) -> Paragraph<'_> {
     text.lines.push(Line::from("c - add from clipboard"));
     text.lines.push(Line::from("i - import image"));
     text.lines.push(Line::from("v - review list"));
+    text.lines.push(Line::from("Ctrl+k - AI cleanup review"));
     text.lines.push(Line::from("q - quit"));
 
     Paragraph::new(text)
@@ -837,6 +876,50 @@ fn render_message(app: &App) -> Paragraph<'_> {
         .wrap(Wrap { trim: true })
 }
 
+fn render_cleanup_review(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    let mut text = Text::default();
+    text.lines.push(Line::from("AI Translation Cleanup"));
+    text.lines.push(Line::from(""));
+    if let Some(state) = &app.cleanup_state {
+        if let Some(entry) = state.suggestions.get(state.index) {
+            text.lines.push(Line::from(format!(
+                "Word: {} ({})",
+                entry.text, entry.language
+            )));
+            let current = entry
+                .current_translation
+                .as_deref()
+                .unwrap_or("No translation yet");
+            text.lines
+                .push(Line::from(format!("Current translation: {}", current)));
+            text.lines
+                .push(Line::from(format!("Suggestion: {}", entry.suggestion)));
+            if let Some(notes) = entry.notes.as_deref() {
+                text.lines.push(Line::from(format!("Notes: {}", notes)));
+            }
+            text.lines.push(Line::from(""));
+            text.lines.push(Line::from(format!(
+                "Progress: {}/{}",
+                state.index + 1,
+                state.suggestions.len()
+            )));
+        } else {
+            text.lines
+                .push(Line::from("No cleanup suggestions at the moment."));
+        }
+    } else {
+        text.lines
+            .push(Line::from("Preparing AI cleanup suggestions… please wait."));
+    }
+    text.lines.push(Line::from(""));
+    text.lines
+        .push(Line::from("y accept | n reject | s skip | q cancel"));
+    let paragraph = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title("AI Cleanup"))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
 fn render_review_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let mut text = Text::default();
     text.lines.push(Line::from("Review List"));
@@ -932,7 +1015,7 @@ fn render_confirm(app: &App) -> Paragraph<'_> {
 fn render_footer(app: &App) -> Paragraph<'_> {
     let info = match app.mode {
         Mode::Menu => {
-            "a add | c clipboard | i import | v review list | q quit | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
+            "a add | c clipboard | i import | v review list | Ctrl+K cleanup | q quit | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
         }
         Mode::AddWord => {
             "Enter save | Tab switch | Esc clear | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit"
@@ -945,6 +1028,7 @@ fn render_footer(app: &App) -> Paragraph<'_> {
         Mode::ChapterSelect => "Up/Down or j/k move | Enter select | Esc back",
         Mode::Confirm => "y confirm | n cancel",
         Mode::Message => "Any key back | Ctrl+A add | Ctrl+O import | Ctrl+V list | Ctrl+Q quit",
+        Mode::CleanupReview => "y accept | n reject | s skip | q cancel",
     };
 
     Paragraph::new(info).block(
@@ -959,6 +1043,85 @@ fn language_label(language: Language) -> &'static str {
         Language::Dutch => "Dutch",
         Language::English => "English",
     }
+}
+
+const CLEANUP_BATCH_SIZE: usize = 10;
+const CLEANUP_REVIEW_COOLDOWN_HOURS: i64 = 2;
+
+fn begin_cleanup_review(db: &dyn Db, app: &mut App) -> Result<(), String> {
+    let entries = collect_cleanup_entries(db, CLEANUP_BATCH_SIZE)?;
+    let suggestions = request_cleanup_suggestions(&entries)?;
+    if suggestions.is_empty() {
+        return Err("AI cleanup returned no suggestions.".to_string());
+    }
+    app.start_cleanup_mode(suggestions);
+    Ok(())
+}
+
+fn collect_cleanup_entries(db: &dyn Db, limit: usize) -> Result<Vec<CleanupEntry>, String> {
+    let cutoff = Utc::now() - ChronoDuration::hours(CLEANUP_REVIEW_COOLDOWN_HOURS);
+    let rows = db
+        .cleanup_candidates(limit, cutoff)
+        .map_err(|err| err.to_string())?;
+    if rows.is_empty() {
+        return Err("No translated words available for cleanup review.".to_string());
+    }
+    let entries = rows
+        .into_iter()
+        .map(|row| CleanupEntry {
+            word_id: row.word_id.to_string(),
+            text: row.text,
+            translation: row.translation,
+            language: format!("{:?}", row.language),
+            sentence: row.sentence,
+        })
+        .collect();
+    Ok(entries)
+}
+
+fn request_cleanup_suggestions(entries: &[CleanupEntry]) -> Result<Vec<CleanupSuggestion>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|err| format!("Failed to build AI request client: {err}"))?;
+    let url = format!("{}/ai/cleanup", cleanup_server_base_url());
+    let response = client
+        .post(&url)
+        .json(&CleanupRequest {
+            entries: entries.to_vec(),
+        })
+        .send()
+        .map_err(|err| format!("AI cleanup request failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(format!("AI cleanup request failed: {status} {body}"));
+    }
+    let payload = response
+        .json::<CleanupResponse>()
+        .map_err(|err| format!("Failed to parse AI cleanup response: {err}"))?;
+    let mut suggestions = Vec::new();
+    for item in payload.suggestions {
+        suggestions.push(convert_cleanup_item(item)?);
+    }
+    Ok(suggestions)
+}
+
+fn cleanup_server_base_url() -> String {
+    std::env::var("AUTH_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8787".to_string())
+}
+
+fn convert_cleanup_item(item: CleanupResponseItem) -> Result<CleanupSuggestion, String> {
+    let word_id = Uuid::parse_str(&item.word_id)
+        .map_err(|err| format!("Invalid word_id from AI cleanup response: {err}"))?;
+    Ok(CleanupSuggestion {
+        word_id,
+        text: item.text,
+        language: item.language,
+        current_translation: item.current_translation,
+        suggestion: item.suggestion,
+        notes: item.notes,
+    })
 }
 
 #[derive(Debug)]
@@ -980,6 +1143,7 @@ struct App {
     message: Option<String>,
     confirm_message: Option<String>,
     confirm_action: Option<ConfirmAction>,
+    cleanup_state: Option<CleanupState>,
     review_list: Vec<Word>,
     review_list_selection: usize,
     review_list_collapsed: HashSet<String>,
@@ -1003,8 +1167,8 @@ impl App {
         translation_tx: Sender<TranslationResult>,
         translation_rx: Receiver<TranslationResult>,
     ) -> Self {
-        Self {
-            mode: Mode::AddWord,
+        let mut app = Self {
+            mode: Mode::Import,
             dutch_input: String::new(),
             english_input: String::new(),
             add_field: AddField::Dutch,
@@ -1021,6 +1185,7 @@ impl App {
             message: None,
             confirm_message: None,
             confirm_action: None,
+            cleanup_state: None,
             review_list: Vec::new(),
             review_list_selection: 0,
             review_list_collapsed: HashSet::new(),
@@ -1035,7 +1200,9 @@ impl App {
             last_edit_english_at: None,
             last_translated_dutch_source: None,
             last_translated_english_source: None,
-        }
+        };
+        app.start_import();
+        app
     }
 
     fn tick(&mut self) {
@@ -1050,6 +1217,53 @@ impl App {
         self.confirm_action = Some(action);
         self.confirm_message = Some(message);
         self.mode = Mode::Confirm;
+    }
+
+    fn start_cleanup_mode(&mut self, suggestions: Vec<CleanupSuggestion>) {
+        self.cleanup_state = Some(CleanupState {
+            suggestions,
+            index: 0,
+            accepted: 0,
+        });
+        self.mode = Mode::CleanupReview;
+        self.message = None;
+    }
+
+    fn cleanup_current(&self) -> Option<&CleanupSuggestion> {
+        self.cleanup_state
+            .as_ref()
+            .and_then(|state| state.suggestions.get(state.index))
+    }
+
+    fn record_cleanup_acceptance(&mut self) {
+        if let Some(state) = self.cleanup_state.as_mut() {
+            state.accepted += 1;
+        }
+    }
+
+    fn advance_cleanup(&mut self) {
+        if let Some(state) = self.cleanup_state.as_mut() {
+            state.index += 1;
+            if state.index >= state.suggestions.len() {
+                let applied = state.accepted;
+                self.cleanup_state = None;
+                self.mode = Mode::Menu;
+                let summary = if applied > 0 {
+                    format!("Cleanup review complete — {} updates applied", applied)
+                } else {
+                    "Cleanup review complete — no updates applied".to_string()
+                };
+                self.message = Some(summary);
+            }
+        }
+    }
+
+    fn cancel_cleanup(&mut self, note: Option<String>) {
+        self.cleanup_state = None;
+        self.mode = Mode::Menu;
+        if let Some(note) = note {
+            self.message = Some(note);
+        }
     }
 
     fn start_add(&mut self, prefilling: Option<String>) {
@@ -1396,6 +1610,53 @@ enum Mode {
     ImportPreview,
     ChapterSelect,
     Message,
+    CleanupReview,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupState {
+    suggestions: Vec<CleanupSuggestion>,
+    index: usize,
+    accepted: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CleanupSuggestion {
+    word_id: Uuid,
+    text: String,
+    language: String,
+    current_translation: Option<String>,
+    suggestion: String,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CleanupEntry {
+    word_id: String,
+    text: String,
+    translation: Option<String>,
+    language: String,
+    sentence: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupRequest {
+    entries: Vec<CleanupEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CleanupResponse {
+    suggestions: Vec<CleanupResponseItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CleanupResponseItem {
+    word_id: String,
+    text: String,
+    language: String,
+    current_translation: Option<String>,
+    suggestion: String,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -59,6 +59,35 @@ struct GradeSentenceRequest {
     concept: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CleanupEntry {
+    word_id: String,
+    text: String,
+    translation: Option<String>,
+    language: String,
+    sentence: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CleanupRequest {
+    entries: Vec<CleanupEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupSuggestion {
+    word_id: String,
+    text: String,
+    language: String,
+    current_translation: Option<String>,
+    suggestion: String,
+    notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupResponse {
+    suggestions: Vec<CleanupSuggestion>,
+}
+
 #[derive(Debug, Serialize)]
 struct OpenAIMessage {
     role: String,
@@ -135,6 +164,7 @@ async fn main() {
         .route("/auth/sign-up", post(sign_up))
         .route("/ai/generate-sentence", post(generate_sentence))
         .route("/ai/generate-question", post(generate_question))
+        .route("/ai/cleanup", post(cleanup_translations))
         .route("/ai/grade-sentence", post(grade_sentence))
         .fallback(proxy_request)
         .with_state(state.clone())
@@ -323,11 +353,11 @@ async fn generate_question(
     let concept = sanitize_concept(&payload.concept);
     let concept_note = concept
         .as_ref()
-        .map(|value| format!(" Incorporate the concept \"{value}\" into the scenario.", value = value))
+        .map(|value| format!(" Include the concept \"{value}\" in the question so the learner can use both the word and that construction.", value = value))
         .unwrap_or_default();
-    let system = "Return a compact JSON object with key \"question\". No markdown. Compose the question in Dutch at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word and any highlighted concept.";
+    let system = "Return a compact JSON object with key \"question\". No markdown. Compose the question in Dutch at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word and, when available, the highlighted concept.";
     let user = format!(
-        "Using the word \"{word}\" ({source}), craft a Dutch CEFR B1 question that asks the learner to reply with a Dutch sentence featuring the word{concept_note} Respond only with the question itself.",
+        "Using the word \"{word}\" ({source}), craft a Dutch CEFR B1 question that mentions both the word and the concept, then ask the learner to reply with a Dutch sentence featuring them. {concept_note} Respond only with the question itself.",
         source = payload.source_language,
         word = payload.word,
         concept_note = concept_note
@@ -335,6 +365,59 @@ async fn generate_question(
     let content = call_openai(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(Json(data))
+}
+
+async fn cleanup_translations(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CleanupRequest>,
+) -> Result<Json<CleanupResponse>, StatusCode> {
+    let Some(key) = state.openai_key.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if payload.entries.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut suggestions = Vec::new();
+    for entry in payload.entries.iter().take(10) {
+        let translation_hint = entry
+            .translation
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or("none");
+        let context = entry
+            .sentence
+            .as_ref()
+            .map(|value| value.as_str())
+            .unwrap_or("no example sentence provided");
+        let system = "Return a compact JSON object with keys \"suggestion\" and \"notes\" only. No markdown. Keep the translation text CEFR B1-level, fully in English, and avoid repeating the Dutch input or wrapping it in parentheses.";
+        let user = format!(
+            "Review the current translation for the Dutch word \"{word}\" ({language}) with the existing suggestion \"{translation}\". Context: {context}. Provide only an improved English translation; do not include any Dutch words or remark about the original. Keep the translation natural and indicate your reasoning under \"notes\".",
+            word = entry.text,
+            language = entry.language,
+            translation = translation_hint,
+            context = context
+        );
+        let content = call_openai(&state, key, system, &user).await?;
+        let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let suggestion = data
+            .get("suggestion")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let notes = data
+            .get("notes")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        suggestions.push(CleanupSuggestion {
+            word_id: entry.word_id.clone(),
+            text: entry.text.clone(),
+            language: entry.language.clone(),
+            current_translation: entry.translation.clone(),
+            suggestion,
+            notes,
+        });
+    }
+    Ok(Json(CleanupResponse { suggestions }))
 }
 
 async fn grade_sentence(

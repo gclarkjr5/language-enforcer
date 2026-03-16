@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use dotenvy::dotenv;
+use chrono::{DateTime, Utc};
 use le_core::{Language, Word};
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
@@ -66,6 +66,7 @@ impl From<::postgres::Error> for DbError {
     }
 }
 
+#[allow(dead_code)]
 pub trait Db {
     fn init(&self) -> DbResult<()>;
     fn save_word(
@@ -82,6 +83,24 @@ pub trait Db {
     fn last_group_for_chapter(&self, chapter: &str) -> DbResult<Option<String>>;
     fn delete_word(&self, word_id: Uuid) -> DbResult<()>;
     fn delete_all_words(&self) -> DbResult<()>;
+    fn update_translation(&self, word_id: Uuid, translation: &str) -> DbResult<()>;
+    fn cleanup_candidates(
+        &self,
+        limit: usize,
+        cutoff: DateTime<Utc>,
+    ) -> DbResult<Vec<CleanupEntryRow>>;
+    fn record_cleanup(&self, word_id: Uuid, cleaned_at: DateTime<Utc>) -> DbResult<()>;
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct CleanupEntryRow {
+    pub word_id: Uuid,
+    pub text: String,
+    pub language: Language,
+    pub translation: Option<String>,
+    pub sentence: Option<String>,
+    pub cleanup_at: Option<DateTime<Utc>>,
 }
 
 pub fn get_db_backend(path: &Path) -> DbResult<Box<dyn Db>> {
@@ -101,5 +120,7 @@ pub fn get_db_backend(path: &Path) -> DbResult<Box<dyn Db>> {
     }
 }
 
+#[allow(unused_imports)]
 pub use postgres::PostgresDb;
+#[allow(unused_imports)]
 pub use sqlite::SqliteDb;

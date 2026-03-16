@@ -2,6 +2,7 @@ Language Enforcer is a Rust + Tauri/Svelte flashcard/workflow suite with a Neon-
 
 ## Acceptance Criteria
 - The CLI TUI must load `data/words.db`, support importing via OCR, translating via configurable APIs, and let users review/save/delete cards.
+- The CLI TUI must also expose an AI cleanup workflow (`k`) that batches up to ten translations to `/ai/cleanup`, walks the user through the OpenAI-proposed edits, and writes accepted translations back to the local mirror.
 - The GUI must present cards, grading controls, modals for fixing/adding words (and concepts), surface AI-generated sentences/questions, and keep a local SQLite mirror in sync with Neon once signed in.
 - An Axum auth server must proxy Neon Auth/Data calls, template OpenAI prompts (generation/grade/question) at B1 level, and expose endpoints the GUI can call.
 - Concepts stored in Neon (and mirrored locally) must influence all AI prompts and be editable via the desktop app.
@@ -15,6 +16,7 @@ Language Enforcer is a Rust + Tauri/Svelte flashcard/workflow suite with a Neon-
 
 ## Features to Replicate
 - TUI review/import workflow with OCR, live translation hooks, and local review stats (cards, grades, sessions).
+- CLI cleanup workflow that batches translations through `/ai/cleanup`, shows AI suggestions per word, and lets the user accept/reject before persisting the change.
 - GUI session flow with special AI cards (translate/create/question), toasts, modals for fix/add/delete operations, concept management, and Neon auth guard rails.
 - Auth server with Neon Auth/Data proxy endpoints plus `/ai/generate-sentence`, `/ai/generate-question`, `/ai/grade-sentence`, all wired to OpenAI (model configurable via `OPENAI_MODEL`).
 - Concept storage backed by a Neon `concepts` table and mirrored in the local DB, so the Tauri app can annotate/guide AI prompts.
@@ -22,6 +24,8 @@ Language Enforcer is a Rust + Tauri/Svelte flashcard/workflow suite with a Neon-
 
 ## Running the System
 - `cargo run -p tui`: launch the OCR/import/review CLI.
+- Set `AUTH_SERVER_URL` to the auth server URL (defaults to `http://127.0.0.1:8787`) when
+  running the CLI cleanup command; it hits `/ai/cleanup` for translation improvements.
 - `npm install` + `npm run dev -- --host 0.0.0.0` inside `gui/frontend`, then `cargo tauri dev`/`cargo tauri ios dev` for the GUI.
 - `cargo run` (inside `auth-server`) with env vars for Neon URLs, PostgreSQL, `OPENAI_API_KEY`, `ALLOWED_ORIGIN`, etc.
 - For signing in with the GUI, point `VITE_AUTH_SERVER_URL` at the auth server (local/ngrok/deployment) and keep the Neon session running.

@@ -7,7 +7,7 @@ use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use uuid::Uuid;
 
-use crate::db::{Db, DbResult};
+use crate::db::{CleanupEntryRow, Db, DbError, DbResult};
 
 pub struct PostgresDb {
     client: Mutex<Client>,
@@ -49,6 +49,7 @@ impl PostgresDb {
         })
     }
 
+    #[allow(dead_code)]
     pub fn open(_path: &Path) -> DbResult<Self> {
         Err(crate::db::DbError::Config(
             "Postgres backend requires DATABASE_URL".to_string(),
@@ -71,6 +72,7 @@ impl Db for PostgresDb {
                 chapter TEXT,
                 group_name TEXT,
                 sentence TEXT,
+                cleanup_at TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS cards (
@@ -88,6 +90,7 @@ impl Db for PostgresDb {
                 grade INTEGER NOT NULL,
                 reviewed_at TEXT NOT NULL
             );
+            ALTER TABLE words ADD COLUMN IF NOT EXISTS cleanup_at TEXT;
             CREATE TABLE IF NOT EXISTS concepts (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -225,6 +228,24 @@ impl Db for PostgresDb {
         Ok(!rows.is_empty())
     }
 
+    fn update_translation(&self, word_id: Uuid, translation: &str) -> DbResult<()> {
+        let mut client = self
+            .client
+            .lock()
+            .map_err(|_| crate::db::DbError::Config("Postgres client lock poisoned".to_string()))?;
+        client
+            .execute(
+                "UPDATE words SET translation = $1 WHERE id = $2",
+                &[&translation, &word_id.to_string()],
+            )
+            .map_err(|err| {
+                let message = format!("Postgres update translation failed: {err}");
+                crate::db::log_error(&message);
+                crate::db::DbError::Config(message)
+            })?;
+        Ok(())
+    }
+
     fn load_all_words(&self) -> DbResult<Vec<Word>> {
         let mut words = Vec::new();
         let mut client = self
@@ -319,6 +340,75 @@ impl Db for PostgresDb {
              DELETE FROM cards;
              DELETE FROM words;",
         )?;
+        Ok(())
+    }
+
+    fn cleanup_candidates(
+        &self,
+        limit: usize,
+        cutoff: DateTime<Utc>,
+    ) -> DbResult<Vec<CleanupEntryRow>> {
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut client = self
+            .client
+            .lock()
+            .map_err(|_| crate::db::DbError::Config("Postgres client lock poisoned".to_string()))?;
+        let rows = client.query(
+            "SELECT id, text, language, translation, sentence, cleanup_at
+             FROM words
+             WHERE translation IS NOT NULL
+               AND (cleanup_at IS NULL OR cleanup_at <= $1)
+             ORDER BY cleanup_at NULLS FIRST, cleanup_at ASC, created_at ASC
+             LIMIT $2",
+            &[&cutoff_str, &(limit as i64)],
+        )?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let word_id_str: String = row.get(0);
+            let word_id = Uuid::parse_str(&word_id_str)
+                .map_err(|err| DbError::Config(format!("Invalid word_id: {err}")))?;
+            let text: String = row.get(1);
+            let language = match row.get::<_, String>(2).as_str() {
+                "Dutch" => Language::Dutch,
+                _ => Language::English,
+            };
+            let translation: Option<String> = row.get(3);
+            let sentence: Option<String> = row.get(4);
+            let cleanup_at = match row.get::<_, Option<String>>(5) {
+                Some(value) => Some(
+                    DateTime::parse_from_rfc3339(&value)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|err| DbError::Config(format!("Invalid cleanup timestamp: {err}")))?,
+                ),
+                None => None,
+            };
+            entries.push(CleanupEntryRow {
+                word_id,
+                text,
+                language,
+                translation,
+                sentence,
+                cleanup_at,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn record_cleanup(&self, word_id: Uuid, cleaned_at: DateTime<Utc>) -> DbResult<()> {
+        let mut client = self
+            .client
+            .lock()
+            .map_err(|_| crate::db::DbError::Config("Postgres client lock poisoned".to_string()))?;
+        client
+            .execute(
+                "UPDATE words SET cleanup_at = $1 WHERE id = $2",
+                &[&cleaned_at.to_rfc3339(), &word_id.to_string()],
+            )
+            .map_err(|err| {
+                let message = format!("Postgres record cleanup failed: {err}");
+                crate::db::log_error(&message);
+                DbError::Config(message)
+            })?;
         Ok(())
     }
 }

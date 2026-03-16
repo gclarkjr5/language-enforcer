@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use le_core::{Card, default_new_card, schedule_sm2};
 use native_tls::TlsConnector;
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
-use rand::seq::SliceRandom;
+use rand::{Rng, seq::SliceRandom};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -125,6 +125,17 @@ struct ReviewState {
     session_limit: usize,
 }
 
+const BATCH_SIZE: usize = 10;
+const MASTERED_EASE: f64 = 3.8;
+const MASTERED_REPS: i32 = 3;
+const MASTERED_RATIO: f64 = 0.75;
+
+struct CardCandidate {
+    id: String,
+    batch_id: i32,
+    weight: f64,
+}
+
 fn find_seed_db(app: &tauri::AppHandle) -> Option<PathBuf> {
     let candidates = [
         app.path().resolve("words.db", BaseDirectory::Resource).ok(),
@@ -207,6 +218,7 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
         ",
     )?;
     ensure_seen_count(&conn)?;
+    ensure_batch_schema(&conn)?;
     Ok(conn)
 }
 
@@ -283,6 +295,125 @@ fn ensure_seen_count(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn ensure_batch_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(cards)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_batch = false;
+    for column in columns {
+        if column? == "batch_id" {
+            has_batch = true;
+            break;
+        }
+    }
+    if !has_batch {
+        conn.execute(
+            "ALTER TABLE cards ADD COLUMN batch_id INTEGER NOT NULL DEFAULT -1",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS batch_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO batch_meta (key, value) VALUES ('active_batch', '0')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn get_active_batch(conn: &Connection) -> rusqlite::Result<i32> {
+    let mut stmt = conn.prepare("SELECT value FROM batch_meta WHERE key = 'active_batch'")?;
+    let value: String = stmt.query_row([], |row| row.get::<_, String>(0))?;
+    Ok(value.parse::<i32>().unwrap_or(0))
+}
+
+fn set_active_batch(conn: &Connection, batch: i32) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO batch_meta (key, value) VALUES ('active_batch', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![batch.to_string()],
+    )?;
+    Ok(())
+}
+
+fn assign_next_batch(conn: &Connection, batch: i32, size: usize) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM cards
+         WHERE batch_id = -1
+         ORDER BY due_at
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![size as i64], |row| row.get::<_, String>(0))?;
+    let mut assigned = 0;
+    for row in rows {
+        let id = row?;
+        conn.execute(
+            "UPDATE cards SET batch_id = ?1 WHERE id = ?2",
+            params![batch, id],
+        )?;
+        assigned += 1;
+    }
+    Ok(assigned)
+}
+
+fn batch_statistics(conn: &Connection, batch: i32) -> rusqlite::Result<(usize, usize)> {
+    let mut stmt =
+        conn.prepare("SELECT interval_days, ease, reps FROM cards WHERE batch_id = ?1")?;
+    let mut rows = stmt.query(params![batch])?;
+    let mut total = 0;
+    let mut mastered = 0;
+    while let Some(row) = rows.next()? {
+        total += 1;
+        if card_is_mastered(
+            row.get::<_, i32>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, i32>(2)?,
+        ) {
+            mastered += 1;
+        }
+    }
+    Ok((total, mastered))
+}
+
+fn card_is_mastered(interval_days: i32, ease: f64, reps: i32) -> bool {
+    ease >= MASTERED_EASE && reps >= MASTERED_REPS && interval_days >= 3
+}
+
+fn should_advance_batch(total: usize, mastered: usize) -> bool {
+    if total == 0 {
+        return false;
+    }
+    (mastered as f64) >= (total as f64 * MASTERED_RATIO).max(1.0)
+}
+
+fn maybe_advance_batch(conn: &Connection) -> rusqlite::Result<i32> {
+    let mut active_batch = get_active_batch(conn)?;
+    let (total, mastered) = batch_statistics(conn, active_batch)?;
+    if total == 0 {
+        let assigned = assign_next_batch(conn, active_batch, BATCH_SIZE)?;
+        if assigned == 0 {
+            let next_batch = active_batch + 1;
+            if assign_next_batch(conn, next_batch, BATCH_SIZE)? > 0 {
+                set_active_batch(conn, next_batch)?;
+                active_batch = next_batch;
+            }
+        }
+        return Ok(active_batch);
+    }
+    if should_advance_batch(total, mastered) {
+        let next_batch = active_batch + 1;
+        if assign_next_batch(conn, next_batch, BATCH_SIZE)? > 0 {
+            set_active_batch(conn, next_batch)?;
+            active_batch = next_batch;
+        }
+    }
+    Ok(active_batch)
+}
+
 #[command]
 fn start_session(
     app: tauri::AppHandle,
@@ -291,28 +422,99 @@ fn start_session(
     let db_path = app_db_path(&app)?;
     let conn = open_db(&db_path).map_err(|err| err.to_string())?;
     let now = Utc::now().to_rfc3339();
+    let active_batch = maybe_advance_batch(&conn).map_err(|err| err.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id FROM cards
-             WHERE due_at <= ?1
-             ORDER BY due_at",
+            "SELECT id, batch_id, interval_days, ease, lapses, seen_count FROM cards
+             WHERE due_at <= ?1",
         )
         .map_err(|err| err.to_string())?;
     let rows = stmt
-        .query_map(params![now], |row| row.get::<_, String>(0))
+        .query_map(params![now], |row| {
+            Ok(CardCandidate {
+                id: row.get::<_, String>(0)?,
+                batch_id: row.get::<_, i32>(1)?,
+                weight: compute_card_weight(
+                    row.get::<_, i32>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, i32>(4)?,
+                    row.get::<_, i32>(5)?,
+                ),
+            })
+        })
         .map_err(|err| err.to_string())?;
-    let mut ids = Vec::new();
+    let mut candidates: Vec<CardCandidate> = Vec::new();
     for row in rows {
-        ids.push(row.map_err(|err| err.to_string())?);
+        candidates.push(row.map_err(|err| err.to_string())?);
     }
-    let mut rng = rand::thread_rng();
-    ids.shuffle(&mut rng);
     let mut guard = state
         .lock()
         .map_err(|_| "Failed to lock review state".to_string())?;
+    guard.queue.clear();
     let limit = guard.session_limit;
-    guard.queue = ids.into_iter().take(limit).collect();
+    guard.queue = select_weighted_cards(candidates, limit, active_batch);
     Ok(())
+}
+
+fn compute_card_weight(interval_days: i32, ease: f64, lapses: i32, seen_count: i32) -> f64 {
+    let difficulty = (3.5 - ease).max(0.2);
+    let interval_factor = 1.0 / ((interval_days.max(1) as f64) + 1.0);
+    let lapse_bonus = (lapses as f64) * 0.15;
+    let seen_bonus = 1.0 / ((seen_count.max(1) as f64) + 1.0);
+    (difficulty + interval_factor + lapse_bonus + seen_bonus * 0.3).max(0.05)
+}
+
+fn select_weighted_cards(
+    candidates: Vec<CardCandidate>,
+    limit: usize,
+    active_batch: i32,
+) -> Vec<String> {
+    let mut primary = Vec::new();
+    let mut secondary = Vec::new();
+    for candidate in candidates {
+        if candidate.batch_id == active_batch {
+            primary.push(candidate);
+        } else {
+            secondary.push(candidate);
+        }
+    }
+    let mut queue = Vec::new();
+    let mut rng = rand::thread_rng();
+    while queue.len() < limit {
+        if let Some(candidate) = pick_weighted_candidate(&mut primary, &mut rng) {
+            queue.push(candidate.id);
+            continue;
+        }
+        if let Some(candidate) = pick_weighted_candidate(&mut secondary, &mut rng) {
+            queue.push(candidate.id);
+            continue;
+        }
+        break;
+    }
+    queue
+}
+
+fn pick_weighted_candidate(
+    candidates: &mut Vec<CardCandidate>,
+    rng: &mut impl Rng,
+) -> Option<CardCandidate> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let total_weight: f64 = candidates.iter().map(|candidate| candidate.weight).sum();
+    if total_weight <= 0.0 {
+        candidates.shuffle(rng);
+        return Some(candidates.remove(0));
+    }
+    let mut pick = rng.gen_range(0.0..total_weight);
+    for idx in 0..candidates.len() {
+        let candidate = &candidates[idx];
+        if pick <= candidate.weight {
+            return Some(candidates.remove(idx));
+        }
+        pick -= candidate.weight;
+    }
+    Some(candidates.remove(candidates.len() - 1))
 }
 
 #[command]
@@ -408,8 +610,11 @@ fn grade_card(
 
     schedule_sm2(&mut card, input.grade, now);
 
+    if input.grade <= 2 {
+        card.due_at = now + Duration::hours(2);
+    }
     conn.execute(
-        "UPDATE cards SET due_at = ?1, interval_days = ?2, ease = ?3, reps = ?4, lapses = ?5 WHERE id = ?6",
+    "UPDATE cards SET due_at = ?1, interval_days = ?2, ease = ?3, reps = ?4, lapses = ?5 WHERE id = ?6",
         params![
             card.due_at.to_rfc3339(),
             card.interval_days,
@@ -801,10 +1006,10 @@ fn refresh_from_postgres(
                     ],
                 )
                 .map_err(|err| {
-            let message = format!("refresh_from_postgres: insert concept failed: {err}");
-            log_error(&message);
-            message
-        })?;
+                    let message = format!("refresh_from_postgres: insert concept failed: {err}");
+                    log_error(&message);
+                    message
+                })?;
             }
         }
         Err(err) => {
@@ -932,23 +1137,6 @@ fn refresh_from_data_api(
     ))
 }
 
-#[command]
-fn counts(app: tauri::AppHandle) -> Result<(i64, i64), String> {
-    let db_path = app_db_path(&app)?;
-    let conn = open_db(&db_path).map_err(|err| err.to_string())?;
-    let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM cards", [], |row| row.get(0))
-        .map_err(|err| err.to_string())?;
-    let due: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM cards WHERE due_at <= ?1",
-            params![Utc::now().to_rfc3339()],
-            |row| row.get(0),
-        )
-        .map_err(|err| err.to_string())?;
-    Ok((due, total))
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -970,7 +1158,6 @@ pub fn run() {
             add_concept_local,
             refresh_from_postgres,
             refresh_from_data_api,
-            counts
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

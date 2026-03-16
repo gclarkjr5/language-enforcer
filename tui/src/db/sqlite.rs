@@ -3,10 +3,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use le_core::{Language, Word, default_new_card};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
+use crate::db::{CleanupEntryRow, Db, DbError, DbResult};
 use uuid::Uuid;
-
-use crate::db::{Db, DbResult};
 
 pub struct SqliteDb {
     conn: Connection,
@@ -36,6 +35,9 @@ impl SqliteDb {
         if !existing.contains("group_name") {
             missing.push("ALTER TABLE words ADD COLUMN group_name TEXT");
         }
+        if !existing.contains("cleanup_at") {
+            missing.push("ALTER TABLE words ADD COLUMN cleanup_at TEXT");
+        }
         for stmt in missing {
             self.conn.execute(stmt, [])?;
         }
@@ -54,6 +56,7 @@ impl Db for SqliteDb {
                 chapter TEXT,
                 group_name TEXT,
                 sentence TEXT,
+                cleanup_at TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS cards (
@@ -222,11 +225,74 @@ impl Db for SqliteDb {
         Ok(())
     }
 
+    fn update_translation(&self, word_id: Uuid, translation: &str) -> DbResult<()> {
+        self.conn.execute(
+            "UPDATE words SET translation = ?1 WHERE id = ?2",
+            params![translation, word_id.to_string()],
+        )?;
+        Ok(())
+    }
+
     fn delete_all_words(&self) -> DbResult<()> {
         self.conn.execute_batch(
             "DELETE FROM reviews;
              DELETE FROM cards;
              DELETE FROM words;",
+        )?;
+        Ok(())
+    }
+
+    fn cleanup_candidates(
+        &self,
+        limit: usize,
+        cutoff: DateTime<Utc>,
+    ) -> DbResult<Vec<CleanupEntryRow>> {
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, language, translation, sentence, cleanup_at
+             FROM words
+             WHERE translation IS NOT NULL
+               AND (cleanup_at IS NULL OR cleanup_at <= ?1)
+             ORDER BY CASE WHEN cleanup_at IS NULL THEN 0 ELSE 1 END, cleanup_at ASC, created_at ASC
+             LIMIT ?2",
+        )?;
+        let mut rows = stmt.query(params![cutoff_str, limit as i64])?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next()? {
+            let word_id_str: String = row.get(0)?;
+            let word_id = Uuid::parse_str(&word_id_str)
+                .map_err(|err| DbError::Config(format!("Invalid word_id: {err}")))?;
+            let text: String = row.get(1)?;
+            let language = match row.get::<_, String>(2)?.as_str() {
+                "Dutch" => Language::Dutch,
+                _ => Language::English,
+            };
+            let translation: Option<String> = row.get(3)?;
+            let sentence: Option<String> = row.get(4)?;
+            let cleanup_at = match row.get::<_, Option<String>>(5)? {
+                Some(value) => Some(
+                    DateTime::parse_from_rfc3339(&value)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|err| DbError::Config(format!("Invalid cleanup timestamp: {err}")))?,
+                ),
+                None => None,
+            };
+            entries.push(CleanupEntryRow {
+                word_id,
+                text,
+                language,
+                translation,
+                sentence,
+                cleanup_at,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn record_cleanup(&self, word_id: Uuid, cleaned_at: DateTime<Utc>) -> DbResult<()> {
+        self.conn.execute(
+            "UPDATE words SET cleanup_at = ?1 WHERE id = ?2",
+            params![cleaned_at.to_rfc3339(), word_id.to_string()],
         )?;
         Ok(())
     }
