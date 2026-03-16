@@ -53,7 +53,22 @@ if [[ -n "$sqlite_file" ]]; then
     echo "SQLite file does not contain a 'words' table; run the app once to bootstrap it first." >&2
     exit 1
   fi
-  if sqlite3 "$sqlite_file" "PRAGMA table_info('words');" | awk -F'|' '{print $2}' | grep -qw cleanup_at; then
+
+  sqlite_columns="$(sqlite3 "$sqlite_file" "PRAGMA table_info('words');")"
+  if ! echo "$sqlite_columns" | awk -F'|' '{print $2}' | grep -qw notes; then
+    if echo "$sqlite_columns" | awk -F'|' '{print $2}' | grep -qw sentence; then
+      sqlite3 "$sqlite_file" "ALTER TABLE words RENAME COLUMN sentence TO notes;"
+      echo "Renamed sentence column to notes in SQLite words table."
+    else
+      sqlite3 "$sqlite_file" "ALTER TABLE words ADD COLUMN notes TEXT;"
+      echo "Added notes column to SQLite database."
+    fi
+    sqlite_columns="$(sqlite3 "$sqlite_file" "PRAGMA table_info('words');")"
+  else
+    echo "SQLite notes column already exists; skipping."
+  fi
+
+  if echo "$sqlite_columns" | awk -F'|' '{print $2}' | grep -qw cleanup_at; then
     echo "SQLite columns already include cleanup_at; skipping."
   else
     sqlite3 "$sqlite_file" "ALTER TABLE words ADD COLUMN cleanup_at TEXT;"
@@ -65,6 +80,19 @@ if [[ -n "$postgres_conn" ]]; then
   if ! psql "$postgres_conn" -c "SELECT 1 FROM pg_tables WHERE tablename='words';" >/dev/null; then
     echo "Postgres database at '$postgres_conn' has no 'words' table; please initialize the schema first." >&2
     exit 1
+  fi
+  notes_column=$(psql "$postgres_conn" -tAc "SELECT 1 FROM information_schema.columns WHERE table_name='words' AND column_name='notes';")
+  sentence_column=$(psql "$postgres_conn" -tAc "SELECT 1 FROM information_schema.columns WHERE table_name='words' AND column_name='sentence';")
+  if [[ -z "$notes_column" ]]; then
+    if [[ -n "$sentence_column" ]]; then
+      psql "$postgres_conn" -c "ALTER TABLE words RENAME COLUMN sentence TO notes;" >/dev/null
+      echo "Renamed sentence column to notes in PostgreSQL."
+    else
+      psql "$postgres_conn" -c "ALTER TABLE words ADD COLUMN notes TEXT;" >/dev/null
+      echo "Added notes column to PostgreSQL."
+    fi
+  else
+    echo "PostgreSQL notes column already exists; skipping."
   fi
   psql "$postgres_conn" -c "ALTER TABLE words ADD COLUMN IF NOT EXISTS cleanup_at TEXT;" >/dev/null
   echo "Ensured cleanup_at column exists on PostgreSQL."

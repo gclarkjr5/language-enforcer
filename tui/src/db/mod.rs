@@ -83,7 +83,12 @@ pub trait Db {
     fn last_group_for_chapter(&self, chapter: &str) -> DbResult<Option<String>>;
     fn delete_word(&self, word_id: Uuid) -> DbResult<()>;
     fn delete_all_words(&self) -> DbResult<()>;
-    fn update_translation(&self, word_id: Uuid, translation: &str) -> DbResult<()>;
+    fn update_translation(
+        &self,
+        word_id: Uuid,
+        translation: &str,
+        notes: Option<&str>,
+    ) -> DbResult<()>;
     fn cleanup_candidates(
         &self,
         limit: usize,
@@ -99,7 +104,7 @@ pub struct CleanupEntryRow {
     pub text: String,
     pub language: Language,
     pub translation: Option<String>,
-    pub sentence: Option<String>,
+    pub notes: Option<String>,
     pub cleanup_at: Option<DateTime<Utc>>,
 }
 

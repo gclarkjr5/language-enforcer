@@ -81,7 +81,7 @@ struct WordRow {
     translation: Option<String>,
     chapter: Option<String>,
     group_name: Option<String>,
-    sentence: Option<String>,
+    notes: Option<String>,
     created_at: String,
 }
 
@@ -189,7 +189,7 @@ fn open_db(path: &PathBuf) -> rusqlite::Result<Connection> {
             translation TEXT,
             chapter TEXT,
             group_name TEXT,
-            sentence TEXT,
+            notes TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS cards (
@@ -780,7 +780,7 @@ fn add_word_local(app: tauri::AppHandle, input: AddWordInput) -> Result<(), Stri
         }
     }
     conn.execute(
-        "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)
+        "INSERT INTO words (id, text, language, translation, chapter, group_name, notes, created_at)
          VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)",
         params![
             input.word_id,
@@ -890,12 +890,12 @@ fn refresh_from_postgres(
     let mut review_count = 0i64;
 
     log_sql(
-        "SELECT id, text, language, translation, chapter, group_name, sentence, created_at FROM words",
+        "SELECT id, text, language, translation, chapter, group_name, notes, created_at FROM words",
         &[],
     );
     let word_rows = client
         .query(
-            "SELECT id, text, language, translation, chapter, group_name, sentence, created_at FROM words",
+            "SELECT id, text, language, translation, chapter, group_name, notes, created_at FROM words",
             &[],
         )
         .map_err(|err| {
@@ -905,7 +905,7 @@ fn refresh_from_postgres(
         })?;
     for row in word_rows {
         tx.execute(
-            "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)
+            "INSERT INTO words (id, text, language, translation, chapter, group_name, notes, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 row.get::<_, String>(0),
@@ -1055,7 +1055,7 @@ fn refresh_from_data_api(
 
     for row in &snapshot.words {
         tx.execute(
-            "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at)
+            "INSERT INTO words (id, text, language, translation, chapter, group_name, notes, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 row.id,
@@ -1064,7 +1064,7 @@ fn refresh_from_data_api(
                 row.translation,
                 row.chapter,
                 row.group_name,
-                row.sentence,
+                row.notes,
                 row.created_at,
             ],
         )

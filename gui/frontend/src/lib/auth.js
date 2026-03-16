@@ -176,7 +176,7 @@ export async function fetchDataApiSnapshot() {
   await requireSession()
   const words = await fetchAll(
     'words',
-    'id,text,language,translation,chapter,group_name,sentence,created_at'
+    'id,text,language,translation,chapter,group_name,notes,created_at'
   )
   const cards = await fetchAll('cards', 'id,word_id,due_at,interval_days,ease,reps,lapses')
   const reviews = await fetchAll('reviews', 'id,card_id,grade,reviewed_at')
@@ -277,16 +277,16 @@ export async function addWord({ text, translation, language = 'Dutch' }) {
   if (duplicateCheck.duplicate) {
     return { duplicate: true, existingTranslation: duplicateCheck.existingTranslation }
   }
-  const word = {
-    id: wordId,
-    text: normalizedText,
-    language,
-    translation: normalizedTranslation || null,
-    chapter: null,
-    group_name: null,
-    sentence: null,
-    created_at: createdAt
-  }
+    const word = {
+        id: wordId,
+        text: normalizedText,
+        language,
+        translation: normalizedTranslation || null,
+        chapter: null,
+        group_name: null,
+        notes: null,
+        created_at: createdAt
+    }
   const card = {
     id: cardId,
     word_id: wordId,

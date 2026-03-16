@@ -65,7 +65,7 @@ struct CleanupEntry {
     text: String,
     translation: Option<String>,
     language: String,
-    sentence: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -385,13 +385,13 @@ async fn cleanup_translations(
             .map(|value| value.as_str())
             .unwrap_or("none");
         let context = entry
-            .sentence
+            .notes
             .as_ref()
             .map(|value| value.as_str())
-            .unwrap_or("no example sentence provided");
-        let system = "Return a compact JSON object with keys \"suggestion\" and \"notes\" only. No markdown. Keep the translation text CEFR B1-level, fully in English, and avoid repeating the Dutch input or wrapping it in parentheses.";
+            .unwrap_or("no notes provided");
+        let system = "Return a compact JSON object with keys \"suggestion\" and \"notes\" only. No markdown. Keep the translation text CEFR B1-level, fully in English, and avoid repeating the Dutch input or wrapping it in parentheses. Focus on the most common uses and renderings rather than every rare meaning.";
         let user = format!(
-            "Review the current translation for the Dutch word \"{word}\" ({language}) with the existing suggestion \"{translation}\". Context: {context}. Provide only an improved English translation; do not include any Dutch words or remark about the original. Keep the translation natural and indicate your reasoning under \"notes\".",
+            "Review the current translation for the Dutch word \"{word}\" ({language}) with the existing suggestion \"{translation}\". Context: {context}. Provide the most natural English phrasing, keeping articles/adverbs in their English positions (e.g., \"het woord\" → \"the word\", \"lopen\" → \"to walk\"), and optionally include a second very common rendering separated by a slash when the word clearly serves two primary roles. Keep the translation keys simple and note any nuance differences under \"notes\".",
             word = entry.text,
             language = entry.language,
             translation = translation_hint,

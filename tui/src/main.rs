@@ -211,8 +211,12 @@ fn handle_cleanup_key(db: &dyn Db, app: &mut App, key: KeyEvent) -> io::Result<b
         }
         KeyCode::Char('y') => {
             if let Some(current) = app.cleanup_current().cloned() {
-                db.update_translation(current.word_id, &current.suggestion)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+                db.update_translation(
+                    current.word_id,
+                    &current.suggestion,
+                    current.notes.as_deref(),
+                )
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
                 mark_cleanup_reviewed(db, current.word_id)?;
                 app.record_cleanup_acceptance();
             }
@@ -1073,7 +1077,7 @@ fn collect_cleanup_entries(db: &dyn Db, limit: usize) -> Result<Vec<CleanupEntry
             text: row.text,
             translation: row.translation,
             language: format!("{:?}", row.language),
-            sentence: row.sentence,
+            notes: row.notes,
         })
         .collect();
     Ok(entries)
@@ -1636,7 +1640,7 @@ struct CleanupEntry {
     text: String,
     translation: Option<String>,
     language: String,
-    sentence: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

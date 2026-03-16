@@ -71,7 +71,7 @@ impl Db for PostgresDb {
                 translation TEXT,
                 chapter TEXT,
                 group_name TEXT,
-                sentence TEXT,
+                notes TEXT,
                 cleanup_at TEXT,
                 created_at TEXT NOT NULL
             );
@@ -90,6 +90,7 @@ impl Db for PostgresDb {
                 grade INTEGER NOT NULL,
                 reviewed_at TEXT NOT NULL
             );
+            ALTER TABLE words ADD COLUMN IF NOT EXISTS notes TEXT;
             ALTER TABLE words ADD COLUMN IF NOT EXISTS cleanup_at TEXT;
             CREATE TABLE IF NOT EXISTS concepts (
                 id TEXT PRIMARY KEY,
@@ -123,7 +124,7 @@ impl Db for PostgresDb {
             chapter: chapter.map(|value| value.to_string()),
             group: group.map(|value| value.to_string()),
             language,
-            sentence: None,
+            notes: None,
             created_at: now,
         };
 
@@ -146,8 +147,8 @@ impl Db for PostgresDb {
 
         client
             .execute(
-                "INSERT INTO words (id, text, language, translation, chapter, group_name, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO words (id, text, language, translation, chapter, group_name, notes, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 &[
                     &word.id.to_string(),
                     &word.text,
@@ -155,6 +156,7 @@ impl Db for PostgresDb {
                     &translation,
                     &chapter,
                     &group,
+                    &word.notes,
                     &created_at,
                 ],
             )
@@ -228,15 +230,20 @@ impl Db for PostgresDb {
         Ok(!rows.is_empty())
     }
 
-    fn update_translation(&self, word_id: Uuid, translation: &str) -> DbResult<()> {
+    fn update_translation(
+        &self,
+        word_id: Uuid,
+        translation: &str,
+        notes: Option<&str>,
+    ) -> DbResult<()> {
         let mut client = self
             .client
             .lock()
             .map_err(|_| crate::db::DbError::Config("Postgres client lock poisoned".to_string()))?;
         client
             .execute(
-                "UPDATE words SET translation = $1 WHERE id = $2",
-                &[&translation, &word_id.to_string()],
+                "UPDATE words SET translation = $1, notes = $2 WHERE id = $3",
+                &[&translation, &notes, &word_id.to_string()],
             )
             .map_err(|err| {
                 let message = format!("Postgres update translation failed: {err}");
@@ -253,7 +260,7 @@ impl Db for PostgresDb {
             .lock()
             .map_err(|_| crate::db::DbError::Config("Postgres client lock poisoned".to_string()))?;
         for row in client.query(
-            "SELECT id, text, language, translation, chapter, group_name, sentence, created_at
+            "SELECT id, text, language, translation, chapter, group_name, notes, created_at
              FROM words
              ORDER BY chapter, group_name, created_at",
             &[],
@@ -273,7 +280,7 @@ impl Db for PostgresDb {
                 translation: row.get(3),
                 chapter: row.get(4),
                 group: row.get(5),
-                sentence: row.get(6),
+                notes: row.get(6),
                 created_at,
             });
         }
@@ -354,7 +361,7 @@ impl Db for PostgresDb {
             .lock()
             .map_err(|_| crate::db::DbError::Config("Postgres client lock poisoned".to_string()))?;
         let rows = client.query(
-            "SELECT id, text, language, translation, sentence, cleanup_at
+            "SELECT id, text, language, translation, notes, cleanup_at
              FROM words
              WHERE translation IS NOT NULL
                AND (cleanup_at IS NULL OR cleanup_at <= $1)
@@ -373,12 +380,14 @@ impl Db for PostgresDb {
                 _ => Language::English,
             };
             let translation: Option<String> = row.get(3);
-            let sentence: Option<String> = row.get(4);
+            let notes: Option<String> = row.get(4);
             let cleanup_at = match row.get::<_, Option<String>>(5) {
                 Some(value) => Some(
                     DateTime::parse_from_rfc3339(&value)
                         .map(|dt| dt.with_timezone(&Utc))
-                        .map_err(|err| DbError::Config(format!("Invalid cleanup timestamp: {err}")))?,
+                        .map_err(|err| {
+                            DbError::Config(format!("Invalid cleanup timestamp: {err}"))
+                        })?,
                 ),
                 None => None,
             };
@@ -387,7 +396,7 @@ impl Db for PostgresDb {
                 text,
                 language,
                 translation,
-                sentence,
+                notes,
                 cleanup_at,
             });
         }

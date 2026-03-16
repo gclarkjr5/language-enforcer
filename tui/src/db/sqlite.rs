@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::db::{CleanupEntryRow, Db, DbError, DbResult};
 use chrono::{DateTime, Utc};
 use le_core::{Language, Word, default_new_card};
-use rusqlite::{params, Connection};
-use crate::db::{CleanupEntryRow, Db, DbError, DbResult};
+use rusqlite::{Connection, params};
 use uuid::Uuid;
 
 pub struct SqliteDb {
@@ -35,6 +35,9 @@ impl SqliteDb {
         if !existing.contains("group_name") {
             missing.push("ALTER TABLE words ADD COLUMN group_name TEXT");
         }
+        if !existing.contains("notes") {
+            missing.push("ALTER TABLE words ADD COLUMN notes TEXT");
+        }
         if !existing.contains("cleanup_at") {
             missing.push("ALTER TABLE words ADD COLUMN cleanup_at TEXT");
         }
@@ -55,7 +58,7 @@ impl Db for SqliteDb {
                 translation TEXT,
                 chapter TEXT,
                 group_name TEXT,
-                sentence TEXT,
+                notes TEXT,
                 cleanup_at TEXT,
                 created_at TEXT NOT NULL
             );
@@ -97,14 +100,14 @@ impl Db for SqliteDb {
             chapter: chapter.map(|value| value.to_string()),
             group: group.map(|value| value.to_string()),
             language,
-            sentence: None,
+            notes: None,
             created_at: now,
         };
 
         let card = default_new_card(word.id, now);
 
         self.conn.execute(
-            "INSERT INTO words (id, text, language, translation, chapter, group_name, sentence, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO words (id, text, language, translation, chapter, group_name, notes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 word.id.to_string(),
                 word.text,
@@ -112,7 +115,7 @@ impl Db for SqliteDb {
                 word.translation,
                 word.chapter,
                 word.group,
-                word.sentence,
+                word.notes,
                 word.created_at.to_rfc3339()
             ],
         )?;
@@ -144,7 +147,7 @@ impl Db for SqliteDb {
     fn load_all_words(&self) -> DbResult<Vec<Word>> {
         let mut words = Vec::new();
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, language, translation, chapter, group_name, sentence, created_at
+            "SELECT id, text, language, translation, chapter, group_name, notes, created_at
              FROM words
              ORDER BY chapter, group_name, created_at",
         )?;
@@ -164,7 +167,7 @@ impl Db for SqliteDb {
                 translation: row.get(3)?,
                 chapter: row.get(4)?,
                 group: row.get(5)?,
-                sentence: row.get(6)?,
+                notes: row.get(6)?,
                 created_at,
             })
         })?;
@@ -225,10 +228,15 @@ impl Db for SqliteDb {
         Ok(())
     }
 
-    fn update_translation(&self, word_id: Uuid, translation: &str) -> DbResult<()> {
+    fn update_translation(
+        &self,
+        word_id: Uuid,
+        translation: &str,
+        notes: Option<&str>,
+    ) -> DbResult<()> {
         self.conn.execute(
-            "UPDATE words SET translation = ?1 WHERE id = ?2",
-            params![translation, word_id.to_string()],
+            "UPDATE words SET translation = ?1, notes = ?2 WHERE id = ?3",
+            params![translation, notes, word_id.to_string()],
         )?;
         Ok(())
     }
@@ -249,7 +257,7 @@ impl Db for SqliteDb {
     ) -> DbResult<Vec<CleanupEntryRow>> {
         let cutoff_str = cutoff.to_rfc3339();
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, language, translation, sentence, cleanup_at
+            "SELECT id, text, language, translation, notes, cleanup_at
              FROM words
              WHERE translation IS NOT NULL
                AND (cleanup_at IS NULL OR cleanup_at <= ?1)
@@ -268,12 +276,14 @@ impl Db for SqliteDb {
                 _ => Language::English,
             };
             let translation: Option<String> = row.get(3)?;
-            let sentence: Option<String> = row.get(4)?;
+            let notes: Option<String> = row.get(4)?;
             let cleanup_at = match row.get::<_, Option<String>>(5)? {
                 Some(value) => Some(
                     DateTime::parse_from_rfc3339(&value)
                         .map(|dt| dt.with_timezone(&Utc))
-                        .map_err(|err| DbError::Config(format!("Invalid cleanup timestamp: {err}")))?,
+                        .map_err(|err| {
+                            DbError::Config(format!("Invalid cleanup timestamp: {err}"))
+                        })?,
                 ),
                 None => None,
             };
@@ -282,7 +292,7 @@ impl Db for SqliteDb {
                 text,
                 language,
                 translation,
-                sentence,
+                notes,
                 cleanup_at,
             });
         }

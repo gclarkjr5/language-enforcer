@@ -16,7 +16,7 @@ pub struct Word {
     pub chapter: Option<String>,
     pub group: Option<String>,
     pub language: Language,
-    pub sentence: Option<String>,
+    pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

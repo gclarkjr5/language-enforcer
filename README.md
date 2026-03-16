@@ -79,6 +79,9 @@ at your Neon URL) before launching the updated app if you already have a populat
   repetitions; new databases include it automatically, and `scripts/migrate-cleanup-column.sh`
   can be run to add the column to older SQLite or Postgres instances before switching to
   the updated code.
+- `notes` replaces the old `sentence` column in both local and Neon mirrors so the
+  AI cleanup notes are stored alongside translations; the migration script also renames
+  the column when necessary.
 
 > **Neon schema note:** create a `concepts` table in your Neon database so these
 > entries are shared across devices:
