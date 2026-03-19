@@ -61,6 +61,7 @@
   let authState = getAuthState()
   let toastMessage = ''
   let toastTimer = null
+  let showNotesModal = false
   let email = ''
   let password = ''
   let name = ''
@@ -72,6 +73,7 @@
   $: showError = Boolean(error) && !isAuthRequiredError(error)
   $: isBusy = loading || syncing
   $: canGrade = !specialActive || specialType !== 'create' || Boolean(specialFeedback)
+  $: if (!showAnswer && showNotesModal) showNotesModal = false
 
   function showToast(message) {
     toastMessage = message
@@ -358,6 +360,10 @@
   function closeDeleteConfirm() {
     showDeleteConfirm = false
     deleteError = ''
+  }
+
+  function closeNotesModal() {
+    showNotesModal = false
   }
 
   async function submitFix() {
@@ -969,6 +975,30 @@
     </div>
   {/if}
 
+  {#if showNotesModal}
+    <div
+      class="modal-backdrop"
+      role="button"
+      tabindex="0"
+      aria-label="Close notes dialog"
+      on:click={closeNotesModal}
+      on:keydown={(event) => handleBackdropKey(event, closeNotesModal)}>
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        tabindex="0"
+        on:click|stopPropagation
+        on:keydown|stopPropagation>
+        <h2>Notes</h2>
+        <div class="modal-note">{current?.notes ?? 'No notes recorded'}</div>
+        <div class="modal-actions">
+          <button class="ghost" on:click={closeNotesModal}>Close</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if showLoadingCard}
     <div class="card">Loading…</div>
   {:else if !current}
@@ -1071,6 +1101,9 @@
         <div class="prompt">{showReverse ? current.translation ?? current.text : current.text}</div>
         {#if showAnswer}
           <div class="answer">{showReverse ? current.text : current.translation ?? '—'}</div>
+          {#if current?.notes}
+            <button class="ghost" on:click={() => (showNotesModal = true)}>Show notes</button>
+          {/if}
         {:else}
           <button class="reveal" on:click={reveal}>Show answer</button>
         {/if}

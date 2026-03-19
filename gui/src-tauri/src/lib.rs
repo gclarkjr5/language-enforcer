@@ -24,6 +24,7 @@ struct ReviewItem {
     due_at: String,
     chapter: Option<String>,
     group: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,10 +533,10 @@ fn next_due_card(
     };
     drop(guard);
 
-    let mut stmt = conn
+        let mut stmt = conn
         .prepare(
             "SELECT c.id, c.word_id, c.due_at,
-                    w.text, w.translation, w.language, w.chapter, w.group_name
+                    w.text, w.translation, w.language, w.chapter, w.group_name, w.notes
              FROM cards c
              JOIN words w ON w.id = c.word_id
              WHERE c.id = ?1
@@ -560,6 +561,9 @@ fn next_due_card(
                 .map_err(|err| err.to_string())?,
             group: row
                 .get::<_, Option<String>>(7)
+                .map_err(|err| err.to_string())?,
+            notes: row
+                .get::<_, Option<String>>(8)
                 .map_err(|err| err.to_string())?,
         };
         Ok(Some(item))
@@ -1108,6 +1112,11 @@ fn refresh_from_data_api(
         })?;
     }
 
+    tx.execute("DELETE FROM concepts", []).map_err(|err| {
+        let message = format!("refresh_from_data_api: clear concepts failed: {err}");
+        log_error(&message);
+        message
+    })?;
     for row in &snapshot.concepts {
         tx.execute(
             "INSERT INTO concepts (id, name, created_at) VALUES (?1, ?2, ?3)",
