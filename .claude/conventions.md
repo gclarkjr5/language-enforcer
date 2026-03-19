@@ -266,6 +266,62 @@ Small documentation updates (typos, clarifications) MAY be done directly on main
 - Extract reusable logic to `lib/` directory
 - Use stores for shared state
 
+## Command-Line Tool Preferences
+
+When using bash commands, prefer modern alternatives:
+
+### Required Tools
+- **`fd`** instead of `find` - Faster, simpler syntax, respects .gitignore
+- **`rg` (ripgrep)** instead of `grep` - Faster, better defaults, colorized output
+
+### Examples
+
+**Finding files:**
+```bash
+# ❌ DON'T use find
+find . -name "*.rs" -type f
+
+# ✅ DO use fd
+fd -e rs
+fd "Cargo.toml"
+fd "\.rs$" --type f
+```
+
+**Searching file contents:**
+```bash
+# ❌ DON'T use grep
+grep -r "openai" --include="*.rs"
+
+# ✅ DO use ripgrep
+rg "openai" -t rust
+rg "OPENAI" --type-add 'env:*.env' -t env
+```
+
+**Common fd patterns:**
+```bash
+fd -e toml                    # Find all .toml files
+fd -e rs -e toml              # Multiple extensions
+fd "test" --type f            # Files containing "test"
+fd --type d "src"             # Directories named "src"
+fd -H ".env"                  # Include hidden files
+fd -E node_modules -E target  # Exclude directories
+```
+
+**Common rg patterns:**
+```bash
+rg "pattern" -t rust          # Search only Rust files
+rg "pattern" -t js -t ts      # Multiple types
+rg "TODO" --iglob "!test*"    # Exclude test files
+rg "fn \w+" -o                # Only show matches
+rg "error" -C 3               # Show 3 lines context
+rg "openai" -l                # List files only
+```
+
+### Note for AI Assistants
+- Prefer dedicated tools (Grep, Glob) over bash commands when available
+- When bash commands are necessary, use `fd` and `rg`
+- Never use `find` or `grep` commands in bash
+
 ## Testing Philosophy
 
 ### What to Test
