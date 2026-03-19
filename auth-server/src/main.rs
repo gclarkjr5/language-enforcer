@@ -124,7 +124,7 @@ async fn main() {
         .unwrap_or(false);
     let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let anthropic_model = std::env::var("ANTHROPIC_MODEL")
-        .unwrap_or_else(|_| "claude-3-5-haiku-20241022".to_string());
+        .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
 
     let cors = if allowed_origin_list.is_empty() {
         CorsLayer::new()
@@ -153,6 +153,14 @@ async fn main() {
             .expect("failed to build proxy client")
     });
 
+    let anthropic_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(25))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(0)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .build()
+        .expect("failed to build anthropic client");
+
     let state = Arc::new(AppState {
         auth_url,
         proxy_target: proxy_target.clone(),
@@ -160,7 +168,7 @@ async fn main() {
         allowed_origin: allowed_origin_list,
         anthropic_key,
         anthropic_model,
-        anthropic_client: reqwest::Client::new(),
+        anthropic_client,
     });
 
     let app = Router::new()
@@ -333,7 +341,7 @@ async fn generate_sentence(
             )
         })
         .unwrap_or_default();
-    let system = "Return a compact JSON object with keys \"sentence\" and \"translation\". No markdown. Both the sentence and translation should read like a CEFR B1-level example.";
+    let system = "Return ONLY a raw JSON object with keys \"sentence\" and \"translation\". Do NOT use markdown code blocks or formatting. Return pure JSON only. Both the sentence and translation should read like a CEFR B1-level example.";
     let user = format!(
         "Create a natural {source} sentence using the word \"{word}\" at CEFR B1 level. Provide its {target} translation written with B1-level vocabulary and grammar. Translation hint: {hint}.{concept_note}",
         source = payload.source_language,
@@ -359,7 +367,7 @@ async fn generate_question(
         .as_ref()
         .map(|value| format!(" Include the concept \"{value}\" in the question so the learner can use both the word and that construction.", value = value))
         .unwrap_or_default();
-    let system = "Return a compact JSON object with key \"question\". No markdown. Compose the question in Dutch at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word and, when available, the highlighted concept.";
+    let system = "Return ONLY a raw JSON object with key \"question\". Do NOT use markdown code blocks or formatting. Return pure JSON only. Compose the question in Dutch at CEFR B1 level and ensure it clearly asks the learner to respond with a sentence that uses the provided word and, when available, the highlighted concept.";
     let user = format!(
         "Using the word \"{word}\" ({source}), craft a Dutch CEFR B1 question that mentions both the word and the concept, then ask the learner to reply with a Dutch sentence featuring them. {concept_note} Respond only with the question itself.",
         source = payload.source_language,
@@ -393,7 +401,7 @@ async fn cleanup_translations(
             .as_ref()
             .map(|value| value.as_str())
             .unwrap_or("no notes provided");
-        let system = "Return a compact JSON object with keys \"suggestion\" and \"notes\" only. No markdown. Keep the translation text CEFR B1-level, fully in English, and avoid repeating the Dutch input or wrapping it in parentheses. Focus on the most common uses and renderings rather than every rare meaning.";
+        let system = "Return ONLY a raw JSON object with keys \"suggestion\" and \"notes\" only. Do NOT use markdown code blocks or formatting. Return pure JSON only. Keep the translation text CEFR B1-level, fully in English, and avoid repeating the Dutch input or wrapping it in parentheses. Focus on the most common uses and renderings rather than every rare meaning.";
         let user = format!(
             "Review the current translation for the Dutch word \"{word}\" ({language}) with the existing suggestion \"{translation}\". Context: {context}. Provide the most natural English phrasing, keeping articles/adverbs in their English positions (e.g., \"het woord\" → \"the word\", \"lopen\" → \"to walk\"), and optionally include a second very common rendering separated by a slash when the word clearly serves two primary roles. Keep the translation keys simple and note any nuance differences under \"notes\".",
             word = entry.text,
@@ -446,7 +454,7 @@ async fn grade_sentence(
             )
         })
         .unwrap_or_default();
-    let system = "Return a compact JSON object with keys \"score\" (1-10), \"feedback\" (very short), and \"correction\" (a corrected sentence). No markdown. Focus on a CEFR B1-level evaluation.";
+    let system = "Return ONLY a raw JSON object with keys \"score\" (1-10), \"feedback\" (very short), and \"correction\" (a corrected sentence). Do NOT use markdown code blocks or formatting. Return pure JSON only. Focus on a CEFR B1-level evaluation.";
     let user = format!(
         "Evaluate the user's {language} sentence for correct use of the word \"{word}\". Sentence: \"{sentence}\".{question_context}{concept_context} Provide a B1-level score (1-10), describe the issue in a concise rubric, and, if needed, offer a B1-level corrected sentence as the \"correction\" value.",
         language = payload.target_language,
@@ -476,6 +484,10 @@ async fn call_anthropic(
         temperature: 0.7,
         system: Some(system.to_string()),
     };
+    eprintln!("[anthropic] calling model={}", state.anthropic_model);
+    let request_json = serde_json::to_string(&req).unwrap_or_default();
+    eprintln!("[anthropic] request body: {}", request_json);
+
     let resp = state
         .anthropic_client
         .post("https://api.anthropic.com/v1/messages")
@@ -484,21 +496,56 @@ async fn call_anthropic(
         .json(&req)
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|err| {
+            eprintln!("[anthropic] request failed: {err:?}");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    eprintln!("[anthropic] got response status={}", resp.status());
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         eprintln!("[anthropic] error status={status} body={body}");
         return Err(StatusCode::BAD_GATEWAY);
     }
-    let data: Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    eprintln!("[anthropic] reading response body...");
+    let body_bytes = resp.bytes().await.map_err(|err| {
+        eprintln!("[anthropic] failed to read response bytes: {err:?}");
+        StatusCode::BAD_GATEWAY
+    })?;
+    eprintln!("[anthropic] got {} bytes", body_bytes.len());
+
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    eprintln!("[anthropic] response body: {}", body_text);
+
+    let data: Value = serde_json::from_slice(&body_bytes).map_err(|err| {
+        eprintln!("[anthropic] failed to parse JSON: {err:?}");
+        StatusCode::BAD_GATEWAY
+    })?;
+
     let content = data
         .get("content")
         .and_then(|content| content.get(0))
         .and_then(|block| block.get("text"))
         .and_then(|value| value.as_str())
-        .ok_or(StatusCode::BAD_GATEWAY)?;
-    Ok(content.trim().to_string())
+        .ok_or_else(|| {
+            eprintln!("[anthropic] failed to extract text from response");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    // Strip markdown code blocks if present (Claude sometimes wraps JSON in ```json ... ```)
+    let cleaned_content = content
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| content.trim().strip_prefix("```"))
+        .unwrap_or(content.trim())
+        .strip_suffix("```")
+        .unwrap_or(content.trim())
+        .trim();
+
+    eprintln!("[anthropic] cleaned content: {}", cleaned_content);
+    Ok(cleaned_content.to_string())
 }
 
 fn join_url(base: &str, path: &str) -> String {

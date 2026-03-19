@@ -44,7 +44,7 @@ practice, and provides both a command-line TUI workflow and a polished iOS/deskt
 1. Copy `.env.example` (or set envs manually). Required values include:
    - `NEON_AUTH_URL`, `NEON_DATA_API_URL`, `DATABASE_URL`, `BIND_ADDR`.
 - `ANTHROPIC_API_KEY` (+ `ANTHROPIC_MODEL`) for sentence/question generation.
-  - Default model: `claude-3-5-haiku-20241022` (or use `claude-3-5-sonnet-20241022` for higher quality)
+  - Default model: `claude-haiku-4-5-20251001` (or use `claude-sonnet-4-6` for higher quality)
 - `ALLOWED_ORIGIN` (ngrok or local URL for the GUI).
 2. From `auth-server/`, run `cargo run` (or use the included Docker/Fly configs for
    deployment). It proxies sign-in/sign-up calls and exposes `/ai/*` endpoints used by
