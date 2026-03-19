@@ -11,7 +11,7 @@ practice, and provides both a command-line TUI workflow and a polished iOS/deskt
 - `gui/`: the Tauri-powered desktop/ mobile UI plus Svelte frontend under `gui/frontend`.
   Bundled with a local SQLite mirror of the deck and integrations to the auth server.
 - `auth-server/`: lightweight Axum service acting as a proxy between the GUI and Neon
-  Auth/Data APIs; also hosts the OpenAI prompts for sentence generation/checking.
+  Auth/Data APIs; also hosts the Claude AI prompts for sentence generation/checking.
 - `core/`, `scripts/`, `data/`, etc.: shared logic, helper scripts (Vision OCR, migrations),
   and the seeded SQLite `data/words.db`.
 
@@ -43,13 +43,14 @@ practice, and provides both a command-line TUI workflow and a polished iOS/deskt
 
 1. Copy `.env.example` (or set envs manually). Required values include:
    - `NEON_AUTH_URL`, `NEON_DATA_API_URL`, `DATABASE_URL`, `BIND_ADDR`.
-- `OPENAI_API_KEY` (+ `OPENAI_MODEL`) for sentence/question generation.
+- `ANTHROPIC_API_KEY` (+ `ANTHROPIC_MODEL`) for sentence/question generation.
+  - Default model: `claude-3-5-haiku-20241022` (or use `claude-3-5-sonnet-20241022` for higher quality)
 - `ALLOWED_ORIGIN` (ngrok or local URL for the GUI).
 2. From `auth-server/`, run `cargo run` (or use the included Docker/Fly configs for
    deployment). It proxies sign-in/sign-up calls and exposes `/ai/*` endpoints used by
-   the GUI’s sentence/question flows.
+   the GUI's sentence/question flows.
 3. The same service powers the TUI cleanup command with `/ai/cleanup`, so keep your
-   OpenAI config in sync so the CLI can fetch translation suggestions from the same
+   Anthropic config in sync so the CLI can fetch translation suggestions from the same
    model.
 
 ### Database migrations
@@ -70,7 +71,7 @@ at your Neon URL) before launching the updated app if you already have a populat
   local SQLite `batch_meta` table), repeating those cards until the batch hits the mastery
   heuristics before moving to a new batch; the weighted scheduler will still drip older
   cards back in if their ease drops.
-- The auth server also exposes `/ai/cleanup`, which the CLI uses to ask OpenAI for
+- The auth server also exposes `/ai/cleanup`, which the CLI uses to ask Claude for
   translation edits such as missing articles, alternate meanings, or more natural phrasing
   before writing the changes locally.
 - AI prompts live in `auth-server/src/main.rs` and expect the front-end to provide the

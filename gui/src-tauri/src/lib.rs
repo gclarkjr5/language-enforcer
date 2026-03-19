@@ -533,7 +533,7 @@ fn next_due_card(
     };
     drop(guard);
 
-        let mut stmt = conn
+    let mut stmt = conn
         .prepare(
             "SELECT c.id, c.word_id, c.due_at,
                     w.text, w.translation, w.language, w.chapter, w.group_name, w.notes

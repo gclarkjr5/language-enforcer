@@ -20,9 +20,9 @@ struct AppState {
     proxy_target: Option<String>,
     proxy_client: Option<reqwest::Client>,
     allowed_origin: Vec<String>,
-    openai_key: Option<String>,
-    openai_model: String,
-    openai_client: reqwest::Client,
+    anthropic_key: Option<String>,
+    anthropic_model: String,
+    anthropic_client: reqwest::Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,16 +89,19 @@ struct CleanupResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAIMessage {
+struct AnthropicMessage {
     role: String,
     content: String,
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAIRequest {
+struct AnthropicRequest {
     model: String,
-    messages: Vec<OpenAIMessage>,
+    max_tokens: u32,
+    messages: Vec<AnthropicMessage>,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
 }
 
 #[tokio::main]
@@ -119,8 +122,9 @@ async fn main() {
         .ok()
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
         .unwrap_or(false);
-    let openai_key = std::env::var("OPENAI_API_KEY").ok();
-    let openai_model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    let anthropic_model = std::env::var("ANTHROPIC_MODEL")
+        .unwrap_or_else(|_| "claude-3-5-haiku-20241022".to_string());
 
     let cors = if allowed_origin_list.is_empty() {
         CorsLayer::new()
@@ -154,9 +158,9 @@ async fn main() {
         proxy_target: proxy_target.clone(),
         proxy_client,
         allowed_origin: allowed_origin_list,
-        openai_key,
-        openai_model,
-        openai_client: reqwest::Client::new(),
+        anthropic_key,
+        anthropic_model,
+        anthropic_client: reqwest::Client::new(),
     });
 
     let app = Router::new()
@@ -311,7 +315,7 @@ async fn generate_sentence(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<GenerateSentenceRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let Some(key) = state.openai_key.as_ref() else {
+    let Some(key) = state.anthropic_key.as_ref() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     let translation_hint = payload
@@ -338,7 +342,7 @@ async fn generate_sentence(
         hint = translation_hint,
         concept_note = concept_note
     );
-    let content = call_openai(&state, key, system, &user).await?;
+    let content = call_anthropic(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(Json(data))
 }
@@ -347,7 +351,7 @@ async fn generate_question(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<GenerateQuestionRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let Some(key) = state.openai_key.as_ref() else {
+    let Some(key) = state.anthropic_key.as_ref() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     let concept = sanitize_concept(&payload.concept);
@@ -362,7 +366,7 @@ async fn generate_question(
         word = payload.word,
         concept_note = concept_note
     );
-    let content = call_openai(&state, key, system, &user).await?;
+    let content = call_anthropic(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(Json(data))
 }
@@ -371,7 +375,7 @@ async fn cleanup_translations(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CleanupRequest>,
 ) -> Result<Json<CleanupResponse>, StatusCode> {
-    let Some(key) = state.openai_key.as_ref() else {
+    let Some(key) = state.anthropic_key.as_ref() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     if payload.entries.is_empty() {
@@ -397,7 +401,7 @@ async fn cleanup_translations(
             translation = translation_hint,
             context = context
         );
-        let content = call_openai(&state, key, system, &user).await?;
+        let content = call_anthropic(&state, key, system, &user).await?;
         let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
         let suggestion = data
             .get("suggestion")
@@ -424,7 +428,7 @@ async fn grade_sentence(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<GradeSentenceRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let Some(key) = state.openai_key.as_ref() else {
+    let Some(key) = state.anthropic_key.as_ref() else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     let question_context = payload
@@ -451,35 +455,32 @@ async fn grade_sentence(
         question_context = question_context,
         concept_context = concept_context
     );
-    let content = call_openai(&state, key, system, &user).await?;
+    let content = call_anthropic(&state, key, system, &user).await?;
     let data: Value = serde_json::from_str(&content).map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(Json(data))
 }
 
-async fn call_openai(
+async fn call_anthropic(
     state: &AppState,
     key: &str,
     system: &str,
     user: &str,
 ) -> Result<String, StatusCode> {
-    let req = OpenAIRequest {
-        model: state.openai_model.clone(),
-        messages: vec![
-            OpenAIMessage {
-                role: "system".to_string(),
-                content: system.to_string(),
-            },
-            OpenAIMessage {
-                role: "user".to_string(),
-                content: user.to_string(),
-            },
-        ],
+    let req = AnthropicRequest {
+        model: state.anthropic_model.clone(),
+        max_tokens: 1024,
+        messages: vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: user.to_string(),
+        }],
         temperature: 0.7,
+        system: Some(system.to_string()),
     };
     let resp = state
-        .openai_client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(key)
+        .anthropic_client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
         .json(&req)
         .send()
         .await
@@ -487,15 +488,14 @@ async fn call_openai(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        eprintln!("[openai] error status={status} body={body}");
+        eprintln!("[anthropic] error status={status} body={body}");
         return Err(StatusCode::BAD_GATEWAY);
     }
     let data: Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
     let content = data
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
+        .get("content")
+        .and_then(|content| content.get(0))
+        .and_then(|block| block.get("text"))
         .and_then(|value| value.as_str())
         .ok_or(StatusCode::BAD_GATEWAY)?;
     Ok(content.trim().to_string())
